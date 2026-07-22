@@ -262,3 +262,29 @@ describe('графики активности', () => {
     assert.match(src, /Math\.abs\(tzRaw\) <= 14 \* 60/);
   });
 });
+
+/* ─────────────────────────────────────────────
+   5. Аватар собеседника (?peer=)
+   ───────────────────────────────────────────── */
+
+describe('аватар собеседника', () => {
+  const src = readFileSync(join(ROOT, 'lib', 'handlers', 'avatar.js'), 'utf8');
+  const msgs = readFileSync(join(ROOT, 'lib', 'handlers', 'messages.js'), 'utf8');
+
+  test('чужой peer тянется только если он есть в архиве смотрящего', () => {
+    // Без этой проверки по /api/avatar?peer=<любой id> можно было бы
+    // получить фото произвольного пользователя Telegram.
+    assert.match(src, /import \{[^}]*VISIBLE[^}]*\} from '\.\.\/db\.js'/);
+    assert.match(src, /m\.sender_tg_id = \$2 AND \$\{VISIBLE\}/);
+    assert.match(src, /peer not in your archive/);
+  });
+
+  test('нечисловой peer отклоняется до похода в Telegram', () => {
+    assert.match(src, /Number\.isFinite\(peer\)/);
+  });
+
+  test('senderId отдаётся строкой, а не числом', () => {
+    // BIGINT в JSON теряет точность как number — сериализуем строкой
+    assert.match(msgs, /senderId: r\.sender_tg_id \? String\(r\.sender_tg_id\) : null/);
+  });
+});

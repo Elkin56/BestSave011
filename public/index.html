@@ -84,9 +84,10 @@
   .top{display:flex;align-items:center;gap:11px;padding:16px 20px 14px;position:sticky;top:0;z-index:30;
     background:linear-gradient(180deg,rgba(18,15,38,.86),rgba(18,15,38,.5) 78%,transparent);
     backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
-  .logo{width:38px;height:38px;border-radius:13px;flex-shrink:0;background:var(--g-hero);
+  .logo{width:38px;height:38px;border-radius:13px;flex-shrink:0;overflow:hidden;
     display:flex;align-items:center;justify-content:center;
     box-shadow:0 6px 18px rgba(139,92,246,.5),inset 0 1px 0 rgba(255,255,255,.4)}
+  .logo img{width:100%;height:100%;object-fit:cover;border-radius:13px}
   .brand{font-size:19px;font-weight:900;letter-spacing:-.4px}
   .icon-btn{width:40px;height:40px;border-radius:13px;flex-shrink:0;background:var(--glass);
     border:1px solid var(--glass-line);display:flex;align-items:center;justify-content:center;
@@ -146,7 +147,11 @@
     transition:transform .3s var(--spring)}
   .stat:active{transform:scale(.97)}
   .stat .head{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:700;color:var(--txt-lo)}
-  .stat .num{font-size:30px;font-weight:900;line-height:1;margin-top:11px;letter-spacing:-.8px}
+  /* Чистые крупные цифры: заливка текста светлым градиентом, без подложки и glow */
+  .stat .num{font-size:38px;font-weight:900;line-height:1;margin-top:12px;letter-spacing:-1.2px;
+    color:#fff;background:linear-gradient(180deg,#FFFFFF,#CBBEF6);
+    -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+    padding:0;box-shadow:none;border-radius:0;width:auto;height:auto;display:block}
   /* 3D-иконка: объёмный скруглённый бейдж с внутренним светом */
   .chip{display:flex;align-items:center;justify-content:center;flex-shrink:0;width:26px;height:26px;
     border-radius:9px;box-shadow:inset 0 1px 0 rgba(255,255,255,.35)}
@@ -190,6 +195,13 @@
     background:linear-gradient(135deg,rgba(251,113,133,.14),var(--glass))}
   .msg-head{display:flex;align-items:center;gap:8px;margin-bottom:7px;flex-wrap:wrap}
   .msg-who{font-size:13px;font-weight:800}
+  /* Аватар собеседника: фото перекрывает букву-заглушку; при ошибке
+     загрузки <img> удаляется и остаётся буква на градиенте. */
+  .msg-ava{position:relative;width:28px;height:28px;border-radius:10px;flex-shrink:0;overflow:hidden;
+    background:var(--g-purple);display:flex;align-items:center;justify-content:center;
+    font-family:'Nunito';font-weight:900;font-size:13px;color:#fff;
+    box-shadow:0 3px 10px rgba(124,58,237,.4),inset 0 1px 0 rgba(255,255,255,.3)}
+  .msg-ava img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:10px}
   .msg-text{font-size:14.5px;line-height:1.55;word-break:break-word;font-weight:500}
   .empty{text-align:center;padding:56px 32px;color:var(--txt-lo);font-size:14px;line-height:1.7;font-weight:600}
 
@@ -208,7 +220,7 @@
   .connect-title{font-size:15px;font-weight:900;margin:0 0 16px;
     background:var(--g-hero);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
   .connect-step{display:flex;align-items:center;gap:13px;font-size:14px;font-weight:700;margin-bottom:15px}
-  .num{width:28px;height:28px;border-radius:10px;flex-shrink:0;background:var(--g-purple);color:#fff;
+  .step-num{width:28px;height:28px;border-radius:10px;flex-shrink:0;background:var(--g-purple);color:#fff;
     font-weight:900;font-size:13px;display:flex;align-items:center;justify-content:center;
     box-shadow:0 4px 12px rgba(124,58,237,.4);font-family:'Nunito'}
 

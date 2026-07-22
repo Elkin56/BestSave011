@@ -243,7 +243,7 @@ function topBar() {
       <div style="flex:1"><div class="brand">${titles[S.tab]}</div></div>`;
   }
 
-  return `<div class="logo">${sv('shield',17,'#031003',2.2)}</div>
+  return `<div class="logo"><img src="/cat.jpg" alt="" width="38" height="38"></div>
     <div style="flex:1"><div class="brand">${titles[S.tab] || 'BestSave'}</div></div>
     <button class="icon-btn ${S.tab==='notifications'?'':''}" data-tab="notifications" title="Уведомления">${sv('bell',16,'var(--txt-lo)')}</button>
     <button class="icon-btn" data-tab="settings" title="Настройки">${sv('gear',16,'var(--txt-lo)')}</button>
@@ -338,8 +338,8 @@ function Chats() {
              выгружать не даёт.
            </div>`
         : `<div class="connect-title">💬 Личные чаты</div>
-           <div class="connect-step"><span class="num">1</span> Настройки → Telegram Business → Чат-боты</div>
-           <div class="connect-step"><span class="num">2</span> Впишите ${S.botUsername ? '@'+esc(S.botUsername) : 'бота'}</div>
+           <div class="connect-step"><span class="step-num">1</span> Настройки → Telegram Business → Чат-боты</div>
+           <div class="connect-step"><span class="step-num">2</span> Впишите ${S.botUsername ? '@'+esc(S.botUsername) : 'бота'}</div>
            <div class="note">Нужен Telegram Premium.</div>`}
       <button class="btn-green" data-reload style="margin-top:16px">Обновить</button>
       ${addBotLink() ? `<a class="btn-ghost" href="${addBotLink()}" target="_blank" rel="noopener" data-addbot style="margin-top:8px">Добавить бота в группу</a>` : ''}
@@ -384,6 +384,20 @@ function Chats() {
 }
 
 /* ── Чат внутри ── */
+// Аватар собеседника у сообщения: реальное фото из профиля Telegram.
+// Тянется через /api/avatar?peer=<id> — бот берёт фото по id отправителя,
+// доступ проверяется по принадлежности к архиву. Если фото скрыто или id
+// нет — показывается буква на цветной подложке.
+function msgAvatar(m) {
+  const letter = esc((m.senderName || '?')[0]);
+  if (!m.senderId) {
+    return `<span class="msg-ava">${letter}</span>`;
+  }
+  const src = authUrl('/api/avatar', { peer: m.senderId });
+  return `<span class="msg-ava"><img src="${src}" alt="" loading="lazy"
+    onerror="this.remove()">${letter}</span>`;
+}
+
 // Вложение сообщения. Файлы (в т.ч. УДАЛЁННЫХ сообщений) отдаёт /api/media:
 // бот сохранил file_id в момент получения, поэтому фото и голосовые
 // открываются даже после удаления в самом Telegram.
@@ -483,6 +497,7 @@ function ChatView() {
     return S.messages.map((m) => `
       <div class="card msg ${m.isDeleted?'del':''}" style="margin:0 16px 8px;padding:13px">
         <div class="msg-head">
+          ${msgAvatar(m)}
           <span class="msg-who">${esc(m.senderName || 'Кто-то')}</span>
           <time style="font-size:10.5px;color:var(--txt-lo)">${new Date(m.sentAt).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'})}</time>
           ${m.isDeleted?'<span class="tag red" style="margin-left:auto">удалено</span>':''}
@@ -620,8 +635,8 @@ function Profile() {
     <div class="grid2">
       <div class="stat" data-stagger><div class="head"><span class="chip" style="width:24px;height:24px;background:var(--g-purple)">${sv('chat',12,'#fff',2.4)}</span>Чатов</div><div class="num" data-count="${a.chats}">0</div></div>
       <div class="stat" data-stagger><div class="head"><span class="chip" style="width:24px;height:24px;background:var(--g-cyan)">${sv('doc',12,'#fff',2.4)}</span>Сообщений</div><div class="num" data-count="${a.messages}">0</div></div>
-      <div class="stat" data-stagger><div class="head"><span class="chip" style="width:24px;height:24px;background:var(--g-pink)">${sv('shield',12,'#fff',2.4)}</span>Спасено удалённых</div><div class="num" data-count="${a.deleted}" style="background:var(--g-pink);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent">0</div></div>
-      <div class="stat" data-stagger><div class="head"><span class="chip" style="width:24px;height:24px;background:var(--g-green)">${sv('clock',12,'#fff',2.4)}</span>Архив с</div><div class="num" style="font-size:16px">${a.since?new Date(a.since).toLocaleDateString('ru-RU'):'—'}</div></div>
+      <div class="stat" data-stagger><div class="head"><span class="chip" style="width:24px;height:24px;background:var(--g-pink)">${sv('shield',12,'#fff',2.4)}</span>Спасено удалённых</div><div class="num" data-count="${a.deleted}">0</div></div>
+      <div class="stat" data-stagger><div class="head"><span class="chip" style="width:24px;height:24px;background:var(--g-green)">${sv('clock',12,'#fff',2.4)}</span>Архив с</div><div class="num" style="font-size:17px;-webkit-text-fill-color:#F4F1FF;background:none">${a.since?new Date(a.since).toLocaleDateString('ru-RU'):'—'}</div></div>
     </div>
 
     <div class="sec">Подключение</div>
