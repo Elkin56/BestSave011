@@ -32,10 +32,11 @@ const S = {
   chatSearch: '',         // поиск по чатам
   businessConnected: false,
   chat: null, chatTab: 'deleted', messages: [], chatLoading: false,
+  activity: null,
   events: null,
   me: null,
   resourceToken: null,
-  settings: null,         // { notifyDeleted, notifyEdited }
+  settings: null,         // { notifyDeleted, notifyEdited, notifyFake }
   aiTab: 0,
 };
 
@@ -87,10 +88,45 @@ const I = {
   doc:'<path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z"/><path d="M14 3v5h5"/>',
   search:'<circle cx="11" cy="11" r="7"/><path d="M20.5 20.5l-4.2-4.2"/>',
   download:'<path d="M12 3v11M7 10l5 5 5-5"/><path d="M4 20h16"/>',
+  alert:'<path d="M12 3l9 16H3z"/><path d="M12 9v5M12 17h.01"/>',
 };
 const sv = (n, s, c, w) => `<svg viewBox="0 0 24 24" width="${s}" height="${s}" fill="none" stroke="${c}" stroke-width="${w||2}" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0">${I[n]||''}</svg>`;
 
 const COLORS = { gold:'var(--gold)', green:'var(--green)', red:'var(--red)', violet:'var(--violet)', blue:'var(--blue)' };
+
+/* ── анимации визуального слоя (логику не трогают) ──
+   Уважают prefers-reduced-motion: при нём числа ставятся сразу. */
+const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+// Плавный «живой» счётчик: число доезжает до цели с ослаблением.
+function animateCount(el) {
+  const target = Number(el.dataset.count) || 0;
+  if (reduceMotion || target === 0) { el.textContent = fmt(target); return; }
+  const dur = 900, start = performance.now();
+  function step(now) {
+    const p = Math.min(1, (now - start) / dur);
+    const eased = 1 - Math.pow(1 - p, 3); // easeOutCubic
+    el.textContent = fmt(Math.round(target * eased));
+    if (p < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
+// Каскадное появление карточек: назначаем задержки уже отрисованным узлам.
+function applyStagger(root) {
+  if (reduceMotion) return;
+  const items = root.querySelectorAll('[data-stagger]');
+  items.forEach((el, i) => {
+    el.style.animationDelay = Math.min(i * 55, 400) + 'ms';
+    el.classList.add('stagger');
+  });
+}
+
+// Запускаем все счётчики и каскад после отрисовки экрана.
+function runEntrance(root) {
+  root.querySelectorAll('[data-count]').forEach(animateCount);
+  applyStagger(root);
+}
 
 /* ── загрузка ── */
 async function loadAll() {
@@ -121,7 +157,8 @@ async function loadBot() {
 
 async function openChat(id) {
   S.chat = S.chats.find((c) => c.chatId === id);
-  S.tab = 'chatview'; S.chatTab = 'deleted'; S.messages = []; S.chatLoading = true; render();
+  S.tab = 'chatview'; S.chatTab = 'deleted'; S.messages = []; S.activity = null;
+  S.chatLoading = true; render();
   await loadMessages();
 }
 
@@ -141,10 +178,25 @@ async function loadMessages() {
 const addBotLink = () => S.botUsername
   ? `https://t.me/${encodeURIComponent(S.botUsername)}?startgroup=archive` : null;
 
+// Активность считается на сервере; фильтр берём тот же, что и в списке,
+// чтобы графики отвечали выбранной вкладке.
+async function loadActivity() {
+  S.activity = null;
+  render();
+  try {
+    const tz = new Date().getTimezoneOffset();
+    // Для вкладки «Активность» показываем весь чат: свой фильтр у неё нет
+    S.activity = await api(`/api/activity?chatId=${encodeURIComponent(S.chat.chatId)}&tz=${tz}`);
+  } catch (e) {
+    S.activity = { total: 0 };
+  }
+  render();
+}
+
 async function loadSettings() {
   if (S.settings) return;
   try { S.settings = await api('/api/settings'); render(); }
-  catch { S.settings = { notifyDeleted: true, notifyEdited: false, offline: true }; render(); }
+  catch { S.settings = { notifyDeleted: true, notifyEdited: false, notifyFake: true, offline: true }; render(); }
 }
 
 async function toggleSetting(key) {
@@ -201,64 +253,65 @@ function topBar() {
 /* ── Главная ── */
 function Home() {
   const t = S.stats?.totals || {};
-  const stat = (ic, c, label, n) => `<div class="stat">
-    <div class="head"><span class="chip" style="background:${c}22">${sv(ic,12,c,2.2)}</span>${label}</div>
-    <div class="num" style="color:${c}">${fmt(n)}</div></div>`;
+  const stat = (ic, grad, label, n) => `<div class="stat" data-stagger>
+    <div class="head"><span class="chip" style="width:26px;height:26px;background:${grad}">${sv(ic,13,'#fff',2.4)}</span>${label}</div>
+    <div class="num" data-count="${n||0}">0</div></div>`;
 
   const empty = !t.total;
   return `
-    <div class="hero">
+    <div class="hero" data-stagger>
       <div class="hero-glow"></div>
       <img class="cat" src="/cat.jpg" width="520" height="620" decoding="async" alt="BestSave">
+      <div class="hero-title">${S.businessConnected ? 'Под защитой' : 'BestSave'}</div>
       ${S.businessConnected
-        ? `<div class="ok-badge" style="margin-top:10px">✅ Личные чаты подключены</div>`
-        : `<div class="hero-sub" style="margin-top:10px">Архив ещё не подключён</div>`}
+        ? `<div class="ok-badge">${sv('check',15,'#0B3B2E',3)} Личные чаты подключены</div>`
+        : `<div class="hero-sub">Подключите архив, чтобы начать</div>`}
     </div>
 
     ${empty ? `
-      <div class="card" style="margin:14px 16px 0;padding:18px">
-        <div style="font-size:15px;font-weight:800;margin-bottom:10px">Архив пока пуст</div>
+      <div class="card" style="margin:16px;padding:22px" data-stagger>
+        <div style="font-size:16px;font-weight:900;margin-bottom:10px;font-family:'Nunito'">Архив пока пуст</div>
         <div class="note">
           Сообщения появятся здесь, как только придут <b style="color:var(--txt)">новые</b> —
           Telegram не даёт ботам выгружать прошлую переписку.
         </div>
       </div>` : `
-      <div class="grid2" style="margin-top:14px">
-        ${stat('trash','var(--red)','Удалено', t.deleted)}
-        ${stat('pencil','var(--violet)','Изменено', t.edited)}
-        ${stat('image','var(--blue)','Медиа', t.media)}
-        ${stat('mic','var(--pink)','Голосовые', t.voices)}
+      <div class="balance" data-stagger>
+        <div class="balance-orb">${sv('shield',26,'#04231A',2.4)}</div>
+        <div>
+          <div class="balance-label">СОХРАНЕНО СООБЩЕНИЙ</div>
+          <div class="balance-num" data-count="${t.total||0}">0</div>
+        </div>
+        <div class="balance-meta">${S.stats.chats}<br>${S.stats.chats===1?'чат':'чатов'}</div>
       </div>
 
-      <div class="card" style="margin:12px 16px 0;padding:15px;display:flex;align-items:center;gap:12px">
-        <span class="chip" style="width:34px;height:34px;border-radius:11px;background:var(--green-soft);border:1px solid var(--green-line)">
-          ${sv('doc',16,'var(--green)')}</span>
-        <span style="flex:1">
-          <span style="display:block;font-size:12px;color:var(--txt-lo)">Всего в архиве</span>
-          <span style="display:block;font-size:22px;font-weight:800;margin-top:2px">${fmt(t.total)}</span>
-        </span>
-        <span style="font-size:12px;color:var(--txt-lo)">${S.stats.chats} ${S.stats.chats===1?'чат':'чатов'}</span>
+      <div class="grid2" style="margin-top:12px">
+        ${stat('trash','var(--g-pink)','Удалено', t.deleted)}
+        ${stat('pencil','var(--g-purple)','Изменено', t.edited)}
+        ${stat('image','var(--g-cyan)','Медиа', t.media)}
+        ${stat('mic','var(--g-orange)','Голосовые', t.voices)}
       </div>`}
 
     <div class="sec">Быстрый доступ</div>
     <div class="grid2">
-      ${[['chat','Чаты','chats'],['bolt','События','events'],['ai','AI Анализ','ai'],['user','Профиль','profile']]
-        .map(([ic,l,go]) => `<button class="card qa" data-tab="${go}">
-          <span class="chip" style="width:32px;height:32px;border-radius:10px;background:var(--green-soft);border:1px solid var(--green-line)">${sv(ic,15,'var(--green)')}</span>
-          <span style="font-size:13.5px;font-weight:700">${l}</span></button>`).join('')}
+      ${[['chat','Чаты','chats','var(--g-purple)'],['bolt','События','events','var(--g-orange)'],
+         ['ai','AI Анализ','ai','var(--g-cyan)'],['user','Профиль','profile','var(--g-green)']]
+        .map(([ic,l,go,grad]) => `<button class="card qa" data-tab="${go}" data-stagger>
+          <span class="chip" style="width:38px;height:38px;border-radius:13px;background:${grad}">${sv(ic,17,'#fff',2.3)}</span>
+          <span style="font-size:14.5px;font-weight:800;font-family:'Nunito'">${l}</span></button>`).join('')}
     </div>
 
     ${S.stats?.activity?.length ? `
       <div class="sec">Последняя активность</div>
-      <div class="card" style="margin:0 16px;overflow:hidden">
+      <div class="card" style="margin:0 16px;overflow:hidden" data-stagger>
         ${S.stats.activity.map((a,i) => `${i?'<div class="div"></div>':''}
           <div class="row">
-            <span class="ava" style="width:36px;height:36px;font-size:13px">${esc((a.who||'?')[0])}</span>
+            <span class="ava" style="width:40px;height:40px;font-size:15px">${esc((a.who||'?')[0])}</span>
             <span class="row-main">
               <span class="row-title">${esc(a.who)}</span>
-              <span style="display:block;font-size:11.5px;color:var(--${a.tone});margin-top:1px">${a.what}</span>
+              <span style="display:block;font-size:12px;color:var(--${a.tone});margin-top:2px;font-weight:700">${a.what}</span>
             </span>
-            <span style="font-size:10.5px;color:var(--txt-lo)">${timeAgo(a.at)}</span>
+            <span style="font-size:11px;color:var(--txt-dim);font-weight:700">${timeAgo(a.at)}</span>
           </div>`).join('')}
       </div>` : ''}`;
 }
@@ -308,7 +361,7 @@ function Chats() {
 
     <div class="sec">${query ? `Найдено · ${list.length}` : `Подключено · ${S.chats.length}`}</div>
     ${!list.length ? `<div class="empty">По запросу «${esc(S.chatSearch)}» чатов не нашлось.</div>` : `
-    <div class="card" style="margin:0 16px;overflow:hidden">
+    <div class="card" style="margin:0 16px;overflow:hidden" data-stagger>
       ${list.map((c,i) => `${i?'<div class="div"></div>':''}
         <button class="row" data-open="${esc(c.chatId)}" style="width:100%;text-align:left">
           <span class="ava">${esc((c.title||'?')[0])}</span>
@@ -358,9 +411,73 @@ function mediaBlock(m) {
     style="padding:9px 13px;display:inline-flex">${mediaLabel(m.mediaType)} · открыть</a></div>`;
 }
 
+// Предупреждение фейк-контроля под сообщением.
+// Формулировка нейтральная: повтор файла — факт, умысел — предположение.
+function fakeBlock(m) {
+  if (m.repeatOfAt) {
+    return `<div class="fake">${sv('alert',13,'#ffb020')}<span>Этот же файл уже был в архиве —
+      ${new Date(m.repeatOfAt).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'})}.
+      Запись не новая.</span></div>`;
+  }
+  if (m.origSentAt) {
+    return `<div class="fake">${sv('alert',13,'#ffb020')}<span>Переслано. Оригинал отправлен
+      ${new Date(m.origSentAt).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'})}.</span></div>`;
+  }
+  return '';
+}
+
+/* ── Графики активности ── */
+function barChart(values, labels, title, sumText) {
+  const max = Math.max(...values, 1);
+  const peak = values.indexOf(max);
+  return `<div class="chart" data-stagger>
+    <h4>${title}</h4>
+    <div class="bars">
+      ${values.map((v,i) => `<div class="bar ${v===0?'zero':i===peak?'peak':''}"
+        style="height:${Math.max(2, Math.round(v / max * 100))}%;transition-delay:${Math.min(i*14,340)}ms"
+        title="${labels[i]}: ${fmt(v)}"></div>`).join('')}
+    </div>
+    <div class="xlab">${labels.map((l,i) =>
+      `<span>${labels.length > 12 && i % 3 !== 0 ? '' : l}</span>`).join('')}</div>
+    ${sumText ? `<div class="chart-sum">${sumText}</div>` : ''}
+  </div>`;
+}
+
+function ActivityView() {
+  const a = S.activity;
+  if (!a) return spinner();
+  if (!a.total) return `<div class="empty">За выбранным фильтром сообщений нет — графики строить не из чего.</div>`;
+
+  const hourLabels = Array.from({length:24}, (_,i) => String(i).padStart(2,'0'));
+  const wdLabels = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
+
+  const peakHour = a.hours.indexOf(Math.max(...a.hours));
+  const peakWd = a.weekdays.indexOf(Math.max(...a.weekdays));
+  const night = a.hours.slice(0,6).reduce((x,y)=>x+y,0);
+  const nightPct = Math.round(night / a.total * 100);
+
+  const dayValues = a.daily.map((d) => d.count);
+  const dayLabels = a.daily.map((d) => {
+    const dt = new Date(d.day);
+    return dt.getDate() === 1 || dt.getDay() === 1 ? String(dt.getDate()) : '';
+  });
+
+  return `
+    ${barChart(a.hours, hourLabels, 'По часам суток',
+      `Пик — ${String(peakHour).padStart(2,'0')}:00. Ночью (00–06) — ${fmt(night)}, это ${nightPct}%.`)}
+    ${barChart(a.weekdays, wdLabels, 'По дням недели',
+      `Больше всего — ${wdLabels[peakWd]}.`)}
+    ${barChart(dayValues, dayLabels, `За последние ${a.windowDays} дней`,
+      `Всего за период — ${fmt(dayValues.reduce((x,y)=>x+y,0))} из ${fmt(a.total)}.`)}
+    <div class="note" style="margin:0 16px">Время показано в вашем часовом поясе.
+      Считаются только сообщения вашего архива.</div>`;
+}
+
 function ChatView() {
-  const tabs = [['deleted','Удалённые'],['media','Медиа'],['voices','Голосовые'],['edited','Изменённые'],['all','Все']];
+  const tabs = [['deleted','Удалённые'],['media','Медиа'],['voices','Голосовые'],
+    ['edited','Изменённые'],['all','Все'],['activity','Активность']];
   const body = () => {
+    if (S.chatTab === 'activity') return ActivityView();
     if (S.chatLoading) return spinner();
     if (!S.messages.length) return `<div class="empty">Здесь пока пусто.</div>`;
     return S.messages.map((m) => `
@@ -374,13 +491,14 @@ function ChatView() {
         ${m.text ? `<div class="msg-text">${esc(m.text)}</div>` : ''}
         ${!m.text && !m.mediaType ? '<div class="msg-text">—</div>' : ''}
         ${mediaBlock(m)}
+        ${fakeBlock(m)}
       </div>`).join('');
   };
   return `<div class="filters">
       ${tabs.map(([k,l]) => `<button class="chip-btn ${S.chatTab===k?'on':''}" data-ctab="${k}">${l}</button>`).join('')}
     </div>
     <div style="margin-top:14px">${body()}</div>
-    ${!S.chatLoading ? `<button class="btn-ghost" data-export="${esc(S.chat.chatId)}" style="margin:6px 16px 0;width:calc(100% - 32px)">
+    ${!S.chatLoading && S.chatTab !== 'activity' ? `<button class="btn-ghost" data-export="${esc(S.chat.chatId)}" style="margin:6px 16px 0;width:calc(100% - 32px)">
       ${sv('download',15,'var(--green)')} Скачать чат файлом (сообщения + фото + голосовые)</button>` : ''}`;
 }
 
@@ -418,13 +536,13 @@ function Events() {
         <span style="font-size:13.5px;font-weight:800">${esc(e.title)}</span>
         ${e.chat?`<span style="margin-left:auto;font-size:10.5px;color:var(--txt-lo)">${esc(e.chat)}</span>`:''}
       </div>`;
-      if (e.kind === 'first') return `<div class="card ev">
+      if (e.kind === 'first') return `<div class="card ev" data-stagger>
         ${head}<div style="font-size:11px;color:var(--txt-lo);margin-bottom:11px">${esc(e.date||'')}</div>
         ${e.lines.map(([l,v],i)=>`<div class="ev-line" style="${i?'border-top:1px solid var(--line)':''}">
           <span style="font-size:11.5px;color:var(--txt-lo);width:120px;flex-shrink:0">${esc(l)}</span>
           <span style="flex:1;font-size:12.5px;font-weight:600;min-width:0">${esc(v)}</span></div>`).join('')}
       </div>`;
-      return `<div class="card ev">
+      return `<div class="card ev" data-stagger>
         ${head}
         ${e.date?`<div style="font-size:11px;color:var(--txt-lo);margin-bottom:7px">${esc(e.date)}</div>`:''}
         <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
@@ -500,10 +618,10 @@ function Profile() {
 
     <div class="sec">Ваш архив</div>
     <div class="grid2">
-      <div class="stat"><div class="head">Чатов</div><div class="num">${fmt(a.chats)}</div></div>
-      <div class="stat"><div class="head">Сообщений</div><div class="num">${fmt(a.messages)}</div></div>
-      <div class="stat"><div class="head">Спасено удалённых</div><div class="num" style="color:var(--red)">${fmt(a.deleted)}</div></div>
-      <div class="stat"><div class="head">Архив с</div><div class="num" style="font-size:15px">${a.since?new Date(a.since).toLocaleDateString('ru-RU'):'—'}</div></div>
+      <div class="stat" data-stagger><div class="head"><span class="chip" style="width:24px;height:24px;background:var(--g-purple)">${sv('chat',12,'#fff',2.4)}</span>Чатов</div><div class="num" data-count="${a.chats}">0</div></div>
+      <div class="stat" data-stagger><div class="head"><span class="chip" style="width:24px;height:24px;background:var(--g-cyan)">${sv('doc',12,'#fff',2.4)}</span>Сообщений</div><div class="num" data-count="${a.messages}">0</div></div>
+      <div class="stat" data-stagger><div class="head"><span class="chip" style="width:24px;height:24px;background:var(--g-pink)">${sv('shield',12,'#fff',2.4)}</span>Спасено удалённых</div><div class="num" data-count="${a.deleted}" style="background:var(--g-pink);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent">0</div></div>
+      <div class="stat" data-stagger><div class="head"><span class="chip" style="width:24px;height:24px;background:var(--g-green)">${sv('clock',12,'#fff',2.4)}</span>Архив с</div><div class="num" style="font-size:16px">${a.since?new Date(a.since).toLocaleDateString('ru-RU'):'—'}</div></div>
     </div>
 
     <div class="sec">Подключение</div>
@@ -559,6 +677,8 @@ function Settings() {
       ${row('notifyDeleted','Удаление сообщений','Бот напишет в личку, когда в подключённом чате удалят сообщение', s.notifyDeleted)}
       <div class="div"></div>
       ${row('notifyEdited','Изменение сообщений','Сообщение в личку при редактировании — версия «до» уже в архиве', s.notifyEdited)}
+      <div class="div"></div>
+      ${row('notifyFake','Фейк-контроль медиа','Предупредить, если фото или кружок уже приходили раньше — то есть запись не новая', s.notifyFake)}
     </div>
     <div class="note" style="margin:10px 16px 0">
       Работает для личных чатов, подключённых через Telegram Business —
@@ -619,6 +739,7 @@ function nav() {
 }
 
 /* ── рендер ── */
+let prevScreen = null;
 function render() {
   $('top').innerHTML = topBar();
   $('nav').innerHTML = nav();
@@ -628,6 +749,10 @@ function render() {
   const screens = { home:Home, chats:Chats, chatview:ChatView, events:Events, ai:AI,
     profile:Profile, settings:Settings, notifications:Notifications };
   main.innerHTML = (screens[S.tab] || Home)();
+
+  // Визуальный слой: живые счётчики + каскад карточек после отрисовки.
+  runEntrance(main);
+  prevScreen = S.tab;
 }
 
 /* ── события ── */
@@ -644,7 +769,11 @@ document.addEventListener('click', (e) => {
   if (el.dataset.clearSearch !== undefined) { S.chatSearch = ''; render(); return; }
   if (el.dataset.reload !== undefined) { S.events = null; S.settings = null; loadAll(); return; }
   if (el.dataset.open) { openChat(el.dataset.open); return; }
-  if (el.dataset.ctab) { S.chatTab = el.dataset.ctab; loadMessages(); return; }
+  if (el.dataset.ctab) {
+    S.chatTab = el.dataset.ctab;
+    if (S.chatTab === 'activity') { loadActivity(); } else { loadMessages(); }
+    return;
+  }
   if (el.dataset.tab) {
     const to = el.dataset.tab;
     // Запоминаем, откуда пришли в настройки/уведомления — туда и вернёмся

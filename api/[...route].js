@@ -11,6 +11,7 @@
 // /api/bot-info, /api/messages, /api/settings, /api/media, /api/avatar,
 // /api/export, /api/health, /api/diag, /api/setup работают ровно так же.
 
+import activity from '../lib/handlers/activity.js';
 import avatar from '../lib/handlers/avatar.js';
 import botInfo from '../lib/handlers/bot-info.js';
 import chats from '../lib/handlers/chats.js';
@@ -28,6 +29,7 @@ import stats from '../lib/handlers/stats.js';
 // Ключ — первый сегмент пути после /api/. Ключи должны совпадать
 // с прежними именами файлов, чтобы фронтенд не менять.
 const routes = {
+  activity,
   avatar,
   'bot-info': botInfo,
   chats,

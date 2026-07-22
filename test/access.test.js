@@ -204,3 +204,61 @@ describe('запись сообщений привязана к владельц
     assert.match(fn.slice(0, 1600), /wasAbsent/);
   });
 });
+
+/* ─────────────────────────────────────────────
+   4. Фейк-контроль и активность
+   ───────────────────────────────────────────── */
+
+describe('фейк-контроль', () => {
+  const db = readFileSync(join(ROOT, 'lib', 'db.js'), 'utf8');
+  const bot = readFileSync(join(ROOT, 'api', 'bot.js'), 'utf8');
+
+  test('поиск повтора ограничен архивом владельца', () => {
+    // Иначе бот сообщал бы «файл уже был», опираясь на чужую переписку,
+    // и тем самым выдавал факт её существования.
+    const fn = db.slice(db.indexOf('export async function firstSeenMedia'));
+    const body = fn.slice(0, fn.indexOf('\n}'));
+    assert.match(body, /WHERE m\.owner_tg_id = \$1/);
+  });
+
+  test('отпечаток файла сохраняется отдельно от file_id', () => {
+    // file_id у одного и того же файла разный для разных ботов и чатов,
+    // сравнивать по нему нельзя — нужен file_unique_id
+    assert.match(bot, /function mediaUniqueIdOf/);
+    assert.match(bot, /file_unique_id/);
+    assert.match(db, /INSERT INTO message[\s\S]*media_unique_id/);
+  });
+
+  test('свои же сообщения на фейк не проверяются', () => {
+    const fn = bot.slice(bot.indexOf('async function onBusinessMessage'));
+    assert.match(fn.slice(0, 2000), /fromOwner/);
+  });
+
+  test('проверяются только медиа, где повтор осмыслен', () => {
+    // Стикеры повторяются постоянно — предупреждать о них бессмысленно
+    const m = /const FAKE_CHECKED = new Set\(\[([^\]]*)\]\)/.exec(bot);
+    assert.ok(m, 'список проверяемых типов не найден');
+    assert.ok(!m[1].includes('sticker'));
+    assert.ok(m[1].includes('video_note'));
+  });
+});
+
+describe('графики активности', () => {
+  const src = readFileSync(join(ROOT, 'lib', 'handlers', 'activity.js'), 'utf8');
+
+  test('запрос ограничен владельцем', () => {
+    assert.match(src, /import \{[^}]*VISIBLE[^}]*\} from '\.\.\/db\.js'/);
+    assert.ok((src.match(/\bVISIBLE\b/g) || []).length >= 2);
+  });
+
+  test('чужой чат недоступен', () => {
+    assert.match(src, /not your chat/);
+  });
+
+  test('часовой пояс не подставляется в SQL напрямую', () => {
+    // tz приходит от клиента: он проверяется на число и диапазон,
+    // а в запрос уходит параметром, а не склейкой строк
+    assert.match(src, /Number\.isFinite\(tzRaw\)/);
+    assert.match(src, /Math\.abs\(tzRaw\) <= 14 \* 60/);
+  });
+});

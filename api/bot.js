@@ -18,6 +18,7 @@ import {
   ensureSchema, upsertUser, upsertChat, linkChat,
   saveMessage, applyEdit, saveBusinessConnection, markDeleted,
   getBusinessConnection, linkBusinessChat, getUserSettings, updateBotAdminFlag,
+  firstSeenMedia,
 } from '../lib/db.js';
 
 const API = (token, method) => `https://api.telegram.org/bot${token}/${method}`;
@@ -51,6 +52,37 @@ function mediaTypeOf(msg) {
   return null;
 }
 
+// file_unique_id — отпечаток файла. В отличие от file_id он одинаков для
+// одного и того же физического файла в любых чатах и не меняется со временем.
+// Это основа фейк-контроля: повторную присылку того же кружка видно по нему.
+function mediaUniqueIdOf(msg) {
+  if (msg.photo?.length) return msg.photo[msg.photo.length - 1].file_unique_id;
+  return (
+    msg.video?.file_unique_id || msg.voice?.file_unique_id || msg.video_note?.file_unique_id ||
+    msg.document?.file_unique_id || msg.animation?.file_unique_id || msg.sticker?.file_unique_id || null
+  );
+}
+
+// Дата оригинала у пересланного сообщения — Telegram отдаёт её честно.
+// Единственный случай, когда мы знаем настоящее время съёмки/записи.
+function forwardOriginDate(msg) {
+  return msg.forward_origin?.date || msg.forward_date || null;
+}
+
+// Медиа, которое имеет смысл проверять на «свежесть».
+// Стикеры и документы исключены: их повтор — обычное дело, а не обман.
+const FAKE_CHECKED = new Set(['photo', 'video', 'voice', 'video_note', 'animation']);
+
+const MEDIA_RU = {
+  photo: 'фото', video: 'видео', voice: 'голосовое',
+  video_note: 'кружок', animation: 'GIF', document: 'файл', sticker: 'стикер',
+};
+
+function fmtWhen(d) {
+  return new Date(d).toLocaleString('ru-RU', {
+    day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+}
 // file_id вложения: по нему бот скачивает файл через getFile.
 // Он остаётся рабочим и после удаления сообщения — за счёт этого
 // удалённые фото и голосовые можно смотреть прямо в приложении.
@@ -352,14 +384,30 @@ async function onBusinessMessage(msg) {
 
     const chatId = await upsertChat(msg.chat);
     const sender = msg.from || {};
+    const mediaType = mediaTypeOf(msg);
+    const uniqueId = mediaUniqueIdOf(msg);
+    const origDate = forwardOriginDate(msg);
+
+    // ── Фейк-контроль ──
+    // Ищем этот же файл в архиве владельца. Если он уже был — прислали повтор.
+    // Сообщения самого владельца не проверяем: обман тут не при чём.
+    const fromOwner = sender.id === owner;
+    let firstSeen = null;
+    if (!fromOwner && uniqueId && FAKE_CHECKED.has(mediaType)) {
+      firstSeen = await firstSeenMedia(owner, uniqueId);
+    }
+
     await saveMessage({
       chatId,
       tgMsgId: msg.message_id,
       senderTgId: sender.id || null,
       senderName: sender.first_name || null,
       text: msg.text || msg.caption || null,
-      mediaType: mediaTypeOf(msg),
+      mediaType,
       mediaFileId: mediaFileIdOf(msg),
+      mediaUniqueId: uniqueId,
+      repeatOfAt: firstSeen?.at || null,
+      origSentAt: origDate,
       ownerTgId: owner,
       sentAt: msg.date,
     });
@@ -367,7 +415,39 @@ async function onBusinessMessage(msg) {
     // Связываем чат с владельцем бизнес-аккаунта.
     // Без этой связи чат сохраняется, но не виден в приложении.
     await linkBusinessChat(owner, chatId);
+
+    if (firstSeen || (origDate && !fromOwner)) {
+      await notifyFake(owner, msg, mediaType, firstSeen, origDate);
+    }
   });
+}
+
+// Сообщение владельцу о несвежем медиа.
+// Формулировки осторожные: повтор файла — факт, а вот умысел — нет.
+// Человек мог просто переслать сам себе или отправить то же фото повторно.
+async function notifyFake(owner, msg, mediaType, firstSeen, origDate) {
+  const bc = await getBusinessConnection(msg.business_connection_id);
+  if (!bc?.user_chat_id) return;
+
+  const s = await getUserSettings(owner);
+  if (!s.notifyFake) return;
+
+  const what = MEDIA_RU[mediaType] || 'медиа';
+  const who = chatTitleOf(msg.chat);
+  let text;
+
+  if (firstSeen) {
+    text = `⚠️ В чате «${who}» пришло ${what}, которое уже есть в вашем архиве.\n\n` +
+      `Впервые: ${fmtWhen(firstSeen.at)}` +
+      (firstSeen.chat && firstSeen.chat !== who ? ` (чат «${firstSeen.chat}»)` : '') +
+      `\n\nЭто тот же самый файл, а не похожий. Он мог быть отправлен повторно ` +
+      `и без умысла — решайте сами.`;
+  } else {
+    text = `ℹ️ В чате «${who}» переслали ${what}. Оригинал отправлен ${fmtWhen(origDate * 1000)}, ` +
+      `то есть запись не новая.`;
+  }
+
+  await tg('sendMessage', { chat_id: Number(bc.user_chat_id), text });
 }
 
 async function onBusinessEdit(msg) {
