@@ -45,6 +45,7 @@ export default async function handler(req, res) {
     params.push(PAGE);
     const { rows } = await q(
       `SELECT m.id, m.tg_msg_id, m.sender_name, m.text, m.media_type,
+              (m.media_file_id IS NOT NULL) AS has_media,
               m.is_edited, m.is_deleted, m.sent_at, m.edited_at
        FROM message m
        WHERE ${where.join(' AND ')}
@@ -59,6 +60,7 @@ export default async function handler(req, res) {
         senderName: r.sender_name,
         text: r.text,
         mediaType: r.media_type,
+        hasMedia: Boolean(r.has_media),
         isEdited: r.is_edited,
         isDeleted: r.is_deleted,
         sentAt: r.sent_at,

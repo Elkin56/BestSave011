@@ -111,6 +111,15 @@ export async function ensureSchema() {
     ALTER TABLE message ADD COLUMN IF NOT EXISTS biz_conn_id TEXT;
     ALTER TABLE chat_link ADD COLUMN IF NOT EXISTS via_business BOOLEAN NOT NULL DEFAULT false;
 
+    -- file_id медиа от Telegram: по нему бот может скачать файл даже после
+    -- удаления сообщения в чате. У сообщений, сохранённых до этой версии,
+    -- колонка пустая — их файлы восстановить нельзя, и интерфейс говорит об этом честно.
+    ALTER TABLE message ADD COLUMN IF NOT EXISTS media_file_id TEXT;
+
+    -- Настройки уведомлений (бот пишет в личку при удалении/изменении в Business-чатах)
+    ALTER TABLE app_user ADD COLUMN IF NOT EXISTS notify_deleted BOOLEAN NOT NULL DEFAULT true;
+    ALTER TABLE app_user ADD COLUMN IF NOT EXISTS notify_edited  BOOLEAN NOT NULL DEFAULT false;
+
     CREATE INDEX IF NOT EXISTS idx_message_chat_sent ON message (chat_id, sent_at DESC);
     CREATE INDEX IF NOT EXISTS idx_message_deleted ON message (chat_id) WHERE is_deleted;
     CREATE INDEX IF NOT EXISTS idx_bizconn_user ON business_connection (user_tg_id);
@@ -164,10 +173,35 @@ export async function linkChat(userId, chatId, botIsAdmin, viaBusiness = false) 
 // Сохранить входящее сообщение (архивация). Идемпотентно по (chat_id, tg_msg_id).
 export async function saveMessage(m) {
   await q(
-    `INSERT INTO message (chat_id, tg_msg_id, sender_tg_id, sender_name, text, media_type, sent_at)
-     VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7))
+    `INSERT INTO message (chat_id, tg_msg_id, sender_tg_id, sender_name, text, media_type, media_file_id, sent_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, to_timestamp($8))
      ON CONFLICT (chat_id, tg_msg_id) DO NOTHING`,
-    [m.chatId, m.tgMsgId, m.senderTgId, m.senderName, m.text, m.mediaType, m.sentAt]
+    [m.chatId, m.tgMsgId, m.senderTgId, m.senderName, m.text, m.mediaType, m.mediaFileId || null, m.sentAt]
+  );
+}
+
+// ─── Настройки пользователя ───
+
+export async function getUserSettings(tgId) {
+  const { rows } = await q(
+    `SELECT notify_deleted, notify_edited FROM app_user WHERE tg_id = $1`,
+    [tgId]
+  );
+  const r = rows[0];
+  return {
+    notifyDeleted: r ? Boolean(r.notify_deleted) : true,
+    notifyEdited: r ? Boolean(r.notify_edited) : false,
+  };
+}
+
+export async function setUserSettings(tgId, s) {
+  await q(
+    `INSERT INTO app_user (tg_id, notify_deleted, notify_edited)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (tg_id) DO UPDATE SET
+       notify_deleted = EXCLUDED.notify_deleted,
+       notify_edited = EXCLUDED.notify_edited`,
+    [tgId, Boolean(s.notifyDeleted), Boolean(s.notifyEdited)]
   );
 }
 

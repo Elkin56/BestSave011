@@ -75,12 +75,21 @@ export function initDataFromHeader(req) {
 }
 
 /**
+ * initData из запроса: заголовок ИЛИ query-параметр ?auth=.
+ * Query нужен там, где заголовок поставить нельзя: <img>, <audio>,
+ * ссылки на скачивание. Подпись и срок проверяются так же строго.
+ */
+export function initDataFromReq(req) {
+  return initDataFromHeader(req) || (typeof req.query?.auth === 'string' ? req.query.auth : null);
+}
+
+/**
  * Обёртка для API-роутов: проверяет initData, кладёт user в req.tgUser.
  * Возвращает true, если запрос авторизован; иначе сам отвечает 401 и возвращает false.
  */
 export function requireAuth(req, res) {
   const token = process.env.BOT_TOKEN;
-  const initData = initDataFromHeader(req);
+  const initData = initDataFromReq(req);
   const result = verifyInitData(initData, token);
   if (!result.ok) {
     res.status(401).json({ error: 'unauthorized', reason: result.reason });

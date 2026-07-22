@@ -17,7 +17,7 @@
 import {
   ensureSchema, upsertUser, upsertChat, linkChat,
   saveMessage, applyEdit, saveBusinessConnection, markDeleted,
-  getBusinessConnection, linkBusinessChat,
+  getBusinessConnection, linkBusinessChat, getUserSettings,
 } from '../lib/db.js';
 
 const API = (token, method) => `https://api.telegram.org/bot${token}/${method}`;
@@ -49,6 +49,17 @@ function mediaTypeOf(msg) {
   if (msg.animation) return 'animation';
   if (msg.sticker) return 'sticker';
   return null;
+}
+
+// file_id вложения: по нему бот скачивает файл через getFile.
+// Он остаётся рабочим и после удаления сообщения — за счёт этого
+// удалённые фото и голосовые можно смотреть прямо в приложении.
+function mediaFileIdOf(msg) {
+  if (msg.photo?.length) return msg.photo[msg.photo.length - 1].file_id; // максимальный размер
+  return (
+    msg.video?.file_id || msg.voice?.file_id || msg.video_note?.file_id ||
+    msg.document?.file_id || msg.animation?.file_id || msg.sticker?.file_id || null
+  );
 }
 
 // Схему инициализируем один раз на тёплый контейнер, а не на каждый апдейт.
@@ -263,6 +274,7 @@ async function onGroupMessage(msg) {
       senderName: sender.first_name || sender.title || null,
       text: msg.text || msg.caption || null,
       mediaType: mediaTypeOf(msg),
+      mediaFileId: mediaFileIdOf(msg),
       sentAt: msg.date,
     });
   });
@@ -323,6 +335,7 @@ async function onBusinessMessage(msg) {
       senderName: sender.first_name || null,
       text: msg.text || msg.caption || null,
       mediaType: mediaTypeOf(msg),
+      mediaFileId: mediaFileIdOf(msg),
       sentAt: msg.date,
     });
 
@@ -344,7 +357,27 @@ async function onBusinessEdit(msg) {
       text: msg.text || msg.caption || null,
       editedAt: msg.edit_date || msg.date,
     });
+
+    // Уведомление об изменении — только если пользователь включил его в настройках
+    const bc = await getBusinessConnection(msg.business_connection_id);
+    if (bc?.user_chat_id && owner) {
+      const s = await getUserSettings(owner);
+      if (s.notifyEdited) {
+        const who = chatTitleOf(msg.chat);
+        await tg('sendMessage', {
+          chat_id: Number(bc.user_chat_id),
+          text: `✏️ В чате «${who}» изменили сообщение. Версия «до» сохранена в архиве.`,
+        });
+      }
+    }
   });
+}
+
+// Имя личного чата для уведомлений
+function chatTitleOf(chat) {
+  return chat?.title ||
+    [chat?.first_name, chat?.last_name].filter(Boolean).join(' ') ||
+    (chat?.username ? '@' + chat.username : 'чат');
 }
 
 // НАСТОЯЩЕЕ событие удаления — доступно только в Business-режиме.
@@ -355,5 +388,20 @@ async function onBusinessDeleted(ev) {
     if (owner) await linkBusinessChat(owner, chatId);
     const n = await markDeleted(chatId, ev.message_ids || []);
     console.log(`business: помечено удалёнными ${n} сообщений в чате ${ev.chat?.id}`);
+
+    // Уведомление об удалении (по умолчанию включено, выключается в настройках)
+    if (n > 0) {
+      const bc = await getBusinessConnection(ev.business_connection_id);
+      if (bc?.user_chat_id && owner) {
+        const s = await getUserSettings(owner);
+        if (s.notifyDeleted) {
+          const who = chatTitleOf(ev.chat);
+          await tg('sendMessage', {
+            chat_id: Number(bc.user_chat_id),
+            text: `🗑 В чате «${who}» удалили ${n} ${n === 1 ? 'сообщение' : n < 5 ? 'сообщения' : 'сообщений'}. Копии остались в вашем архиве BestSave.`,
+          });
+        }
+      }
+    }
   });
 }
