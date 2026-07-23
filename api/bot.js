@@ -18,8 +18,10 @@ import {
   ensureSchema, upsertUser, upsertChat, linkChat,
   saveMessage, applyEdit, saveBusinessConnection, markDeleted,
   getBusinessConnection, linkBusinessChat, getUserSettings, updateBotAdminFlag,
+  // isQuietNow импортируется отдельно: чистая функция без БД
   firstSeenMedia,
 } from '../lib/db.js';
+import { isQuietNow } from '../lib/quiet.js';
 
 const API = (token, method) => `https://api.telegram.org/bot${token}/${method}`;
 
@@ -431,6 +433,9 @@ async function notifyFake(owner, msg, mediaType, firstSeen, origDate) {
 
   const s = await getUserSettings(owner);
   if (!s.notifyFake) return;
+  // Тихие часы: ночью не пишем. Событие уже сохранено в архиве —
+  // пользователь увидит его утром в приложении, ничего не теряется.
+  if (isQuietNow(s)) return;
 
   const what = MEDIA_RU[mediaType] || 'медиа';
   const who = chatTitleOf(msg.chat);
@@ -472,7 +477,7 @@ async function onBusinessEdit(msg) {
     const bc = await getBusinessConnection(msg.business_connection_id);
     if (bc?.user_chat_id) {
       const s = await getUserSettings(owner);
-      if (s.notifyEdited) {
+      if (s.notifyEdited && !isQuietNow(s)) {
         const who = chatTitleOf(msg.chat);
         await tg('sendMessage', {
           chat_id: Number(bc.user_chat_id),
@@ -507,7 +512,7 @@ async function onBusinessDeleted(ev) {
       const bc = await getBusinessConnection(ev.business_connection_id);
       if (bc?.user_chat_id) {
         const s = await getUserSettings(owner);
-        if (s.notifyDeleted) {
+        if (s.notifyDeleted && !isQuietNow(s)) {
           const who = chatTitleOf(ev.chat);
           await tg('sendMessage', {
             chat_id: Number(bc.user_chat_id),

@@ -12,16 +12,19 @@
 // /api/export, /api/health, /api/diag, /api/setup работают ровно так же.
 
 import activity from '../lib/handlers/activity.js';
+import admin from '../lib/handlers/admin.js';
 import avatar from '../lib/handlers/avatar.js';
 import botInfo from '../lib/handlers/bot-info.js';
 import chats from '../lib/handlers/chats.js';
 import diag from '../lib/handlers/diag.js';
+import erase from '../lib/handlers/erase.js';
 import events from '../lib/handlers/events.js';
 import exportChat from '../lib/handlers/export.js';
 import health from '../lib/handlers/health.js';
 import me from '../lib/handlers/me.js';
 import media from '../lib/handlers/media.js';
 import messages from '../lib/handlers/messages.js';
+import pin from '../lib/handlers/pin.js';
 import settings from '../lib/handlers/settings.js';
 import setup from '../lib/handlers/setup.js';
 import stats from '../lib/handlers/stats.js';
@@ -30,16 +33,19 @@ import stats from '../lib/handlers/stats.js';
 // с прежними именами файлов, чтобы фронтенд не менять.
 const routes = {
   activity,
+  admin,
   avatar,
   'bot-info': botInfo,
   chats,
   diag,
+  erase,
   events,
   export: exportChat,
   health,
   me,
   media,
   messages,
+  pin,
   settings,
   setup,
   stats,

@@ -32,11 +32,14 @@ const S = {
   chatSearch: '',         // поиск по чатам
   businessConnected: false,
   chat: null, chatTab: 'deleted', messages: [], chatLoading: false,
+  msgSearch: '',          // поиск внутри чата
   activity: null,
   events: null,
   me: null,
   resourceToken: null,
   settings: null,         // { notifyDeleted, notifyEdited, notifyFake }
+  admin: null,            // метрики владельца (только если isAdmin)
+  isAdmin: false,
   aiTab: 0,
 };
 
@@ -89,6 +92,7 @@ const I = {
   search:'<circle cx="11" cy="11" r="7"/><path d="M20.5 20.5l-4.2-4.2"/>',
   download:'<path d="M12 3v11M7 10l5 5 5-5"/><path d="M4 20h16"/>',
   alert:'<path d="M12 3l9 16H3z"/><path d="M12 9v5M12 17h.01"/>',
+  pin:'<path d="M12 17v5"/><path d="M9 3h6l-1 7 3 3v2H7v-2l3-3z"/>',
 };
 const sv = (n, s, c, w) => `<svg viewBox="0 0 24 24" width="${s}" height="${s}" fill="none" stroke="${c}" stroke-width="${w||2}" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0">${I[n]||''}</svg>`;
 
@@ -140,6 +144,7 @@ async function loadAll() {
     S.businessConnected = Boolean(chats.businessConnected);
     S.me = me;
     S.resourceToken = me.resourceToken || null;
+    S.isAdmin = Boolean(me.isAdmin);
   } catch (e) { S.error = e.message; }
   finally { S.loading = false; render(); }
 }
@@ -157,7 +162,7 @@ async function loadBot() {
 
 async function openChat(id) {
   S.chat = S.chats.find((c) => c.chatId === id);
-  S.tab = 'chatview'; S.chatTab = 'deleted'; S.messages = []; S.activity = null;
+  S.tab = 'chatview'; S.chatTab = 'deleted'; S.messages = []; S.activity = null; S.msgSearch = '';
   S.chatLoading = true; render();
   await loadMessages();
 }
@@ -165,14 +170,36 @@ async function openChat(id) {
 async function loadMessages() {
   S.chatLoading = true; render();
   try {
-    const f = S.chatTab === 'voices' ? 'media' : S.chatTab;
-    const d = await api(`/api/messages?chatId=${encodeURIComponent(S.chat.chatId)}&filter=${f}`);
+    // voices теперь фильтруется на сервере — раньше клиент отбрасывал часть
+    // выдачи уже после пагинации, из-за чего страница могла прийти полупустой
+    const params = new URLSearchParams({
+      chatId: S.chat.chatId,
+      filter: S.chatTab,
+    });
+    if (S.msgSearch.trim()) params.set('q', S.msgSearch.trim());
+    const d = await api(`/api/messages?${params.toString()}`);
     let list = d.messages || [];
-    if (S.chatTab === 'voices') list = list.filter((m) => ['voice','video_note'].includes(m.mediaType));
     if (S.chatTab === 'media') list = list.filter((m) => !['voice','video_note'].includes(m.mediaType));
     S.messages = list;
   } catch (e) { S.error = e.message; }
   finally { S.chatLoading = false; render(); }
+}
+
+// Закрепить / открепить. Состояние меняем сразу, чтобы отклик был мгновенным,
+// и откатываем, если сервер отказал.
+async function togglePin(msgId) {
+  const m = S.messages.find((x) => x.id === msgId);
+  if (!m) return;
+  const next = !m.isPinned;
+  m.isPinned = next;
+  render();
+  try {
+    await apiPost('/api/pin', { msgId, pinned: next });
+    if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+  } catch {
+    m.isPinned = !next; // откат
+    render();
+  }
 }
 
 const addBotLink = () => S.botUsername
@@ -203,7 +230,14 @@ async function toggleSetting(key) {
   if (!S.settings) return;
   S.settings[key] = !S.settings[key];
   render();
-  try { S.settings = await apiPost('/api/settings', S.settings); }
+  try {
+    // Пояс отправляем всегда: сервер считает «ночь» по нему, а устройство
+    // может переехать в другую зону между сессиями.
+    S.settings = await apiPost('/api/settings', {
+      ...S.settings,
+      tzOffsetMin: -new Date().getTimezoneOffset(),
+    });
+  }
   catch { /* оставляем локально, сохранится при следующем изменении */ }
   render();
 }
@@ -227,7 +261,8 @@ const errBox = (m) => `<div class="err">Не удалось загрузить: 
 
 function topBar() {
   const titles = { home:'BestSave', chats:'Чаты', events:'События', ai:'AI Анализ',
-    profile:'Профиль', settings:'Настройки', notifications:'Уведомления' };
+    profile:'Профиль', settings:'Настройки', notifications:'Уведомления',
+    privacy:'Конфиденциальность', admin:'Панель владельца' };
 
   if (S.tab === 'chatview' && S.chat) {
     return `<button class="icon-btn" data-tab="chats">${sv('back',17,'var(--txt-lo)')}</button>
@@ -238,7 +273,7 @@ function topBar() {
       <button class="icon-btn" data-export="${esc(S.chat.chatId)}" title="Скачать чат">${sv('download',16,'var(--green)')}</button>`;
   }
 
-  if (S.tab === 'settings' || S.tab === 'notifications') {
+  if (['settings','notifications','privacy','admin'].includes(S.tab)) {
     return `<button class="icon-btn" data-tab="${esc(S.prevTab)}">${sv('back',17,'var(--txt-lo)')}</button>
       <div style="flex:1"><div class="brand">${titles[S.tab]}</div></div>`;
   }
@@ -364,23 +399,43 @@ function Chats() {
     <div class="card" style="margin:0 16px;overflow:hidden" data-stagger>
       ${list.map((c,i) => `${i?'<div class="div"></div>':''}
         <button class="row" data-open="${esc(c.chatId)}" style="width:100%;text-align:left">
-          <span class="ava">${esc((c.title||'?')[0])}</span>
+          ${chatAvatar(c)}
           <span class="row-main">
             <span class="row-title">${esc(c.title || 'Без названия')}</span>
             <span class="row-sub">
-              ${c.stats.deleted ? `<span class="tag red" style="margin-right:5px">${sv('trash',10,'var(--red)',2.4)}${fmt(c.stats.deleted)}</span>` : ''}
-              ${c.stats.edited ? `<span class="tag violet" style="margin-right:5px">${sv('pencil',10,'var(--violet)',2.4)}${fmt(c.stats.edited)}</span>` : ''}
+              ${c.stats.deleted ? `<span class="tag red">${sv('trash',10,'currentColor',2.2)}${fmt(c.stats.deleted)}</span>` : ''}
+              ${c.stats.edited ? `<span class="tag violet">${sv('pencil',10,'currentColor',2.2)}${fmt(c.stats.edited)}</span>` : ''}
               ${c.viaBusiness ? '<span class="tag biz">личный</span>' : ''}
               ${!c.stats.deleted && !c.stats.edited && !c.viaBusiness ? 'сообщения в архиве' : ''}
             </span>
           </span>
           <span class="row-side">
             <span class="count-pill" title="Всего сообщений в архиве">${fmt(c.stats.total)}</span>
-            ${sv('arrow',13,'var(--txt-lo)')}
+            ${sv('arrow',13,'var(--txt-dim)')}
           </span>
         </button>`).join('')}
     </div>`}
     ${addBotLink() ? `<a class="btn-ghost" href="${addBotLink()}" target="_blank" rel="noopener" data-addbot style="margin:12px 16px 0">+ Подключить группу</a>` : ''}`;
+}
+
+// Пять запасных градиентов: если фото нет, чаты всё равно различаются
+// цветом, а не сливаются в одинаковые фиолетовые квадраты.
+const AVA_TINTS = ['var(--g-purple)','var(--g-cyan)','var(--g-orange)','var(--g-green)','var(--g-pink)'];
+const tintFor = (key) => {
+  const s = String(key || '');
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return AVA_TINTS[h % AVA_TINTS.length];
+};
+
+// Аватар чата: настоящее фото из Telegram поверх цветной подложки с буквой.
+// Не загрузилось (нет фото, скрыто приватностью) — <img> убирается,
+// остаётся буква.
+function chatAvatar(c) {
+  const letter = esc((c.title || '?')[0]);
+  const src = authUrl('/api/avatar', { chat: c.chatId });
+  return `<span class="ava" style="background:${tintFor(c.chatId)}">
+    <img src="${src}" alt="" loading="lazy" onerror="this.remove()">${letter}</span>`;
 }
 
 /* ── Чат внутри ── */
@@ -488,30 +543,64 @@ function ActivityView() {
 }
 
 function ChatView() {
-  const tabs = [['deleted','Удалённые'],['media','Медиа'],['voices','Голосовые'],
-    ['edited','Изменённые'],['all','Все'],['activity','Активность']];
+  const tabs = [['deleted','Удалённые'],['pinned','Закреплённые'],['media','Медиа'],
+    ['voices','Голосовые'],['edited','Изменённые'],['all','Все'],['activity','Активность']];
+
+  // Подсветка совпадений: экранируем текст, потом оборачиваем найденное.
+  // Порядок важен — иначе разметка подсветки сама стала бы уязвимостью.
+  const highlight = (text) => {
+    const safe = esc(text);
+    const qq = S.msgSearch.trim();
+    if (!qq) return safe;
+    const rx = new RegExp('(' + esc(qq).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+    return safe.replace(rx, '<mark>$1</mark>');
+  };
+
   const body = () => {
     if (S.chatTab === 'activity') return ActivityView();
     if (S.chatLoading) return spinner();
-    if (!S.messages.length) return `<div class="empty">Здесь пока пусто.</div>`;
+    if (!S.messages.length) {
+      if (S.msgSearch.trim()) {
+        return `<div class="empty">По запросу «${esc(S.msgSearch)}» ничего не нашлось.<br>
+          Поиск идёт по тексту сообщений выбранной вкладки.</div>`;
+      }
+      return `<div class="empty">${S.chatTab === 'pinned'
+        ? 'Закреплённых пока нет.<br>Нажмите на кнопку с булавкой у важного сообщения — оно окажется здесь.'
+        : 'Здесь пока пусто.'}</div>`;
+    }
     return S.messages.map((m) => `
-      <div class="card msg ${m.isDeleted?'del':''}" style="margin:0 16px 8px;padding:13px">
+      <div class="card msg ${m.isDeleted?'del':''} ${m.isPinned?'pinned':''}" style="margin:0 16px 8px;padding:13px">
         <div class="msg-head">
           ${msgAvatar(m)}
           <span class="msg-who">${esc(m.senderName || 'Кто-то')}</span>
           <time style="font-size:10.5px;color:var(--txt-lo)">${new Date(m.sentAt).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'})}</time>
-          ${m.isDeleted?'<span class="tag red" style="margin-left:auto">удалено</span>':''}
-          ${m.isEdited && !m.isDeleted?'<span class="tag violet" style="margin-left:auto">изменено</span>':''}
+          <span style="margin-left:auto;display:flex;align-items:center;gap:6px">
+            ${m.isDeleted?'<span class="tag red">удалено</span>':''}
+            ${m.isEdited && !m.isDeleted?'<span class="tag violet">изменено</span>':''}
+            <button class="pin-btn ${m.isPinned?'on':''}" data-pin="${m.id}"
+              title="${m.isPinned?'Открепить':'Закрепить'}">${sv('pin',14,m.isPinned?'#fff':'var(--txt-dim)',2.2)}</button>
+          </span>
         </div>
-        ${m.text ? `<div class="msg-text">${esc(m.text)}</div>` : ''}
+        ${m.text ? `<div class="msg-text">${highlight(m.text)}</div>` : ''}
         ${!m.text && !m.mediaType ? '<div class="msg-text">—</div>' : ''}
         ${mediaBlock(m)}
         ${fakeBlock(m)}
       </div>`).join('');
   };
+
+  // Поиск скрываем на вкладке активности: там искать нечего
+  const searchBox = S.chatTab === 'activity' ? '' : `
+    <div class="search" style="margin-top:12px">
+      ${sv('search',15,'var(--txt-lo)')}
+      <input id="msg-search" type="search" placeholder="Поиск по сообщениям"
+        value="${esc(S.msgSearch)}" autocomplete="off" enterkeyhint="search">
+      ${S.msgSearch ? `<button class="icon-btn" data-clear-msgsearch style="width:26px;height:26px;border:none;background:none">✕</button>` : ''}
+    </div>`;
+
   return `<div class="filters">
       ${tabs.map(([k,l]) => `<button class="chip-btn ${S.chatTab===k?'on':''}" data-ctab="${k}">${l}</button>`).join('')}
     </div>
+    ${searchBox}
     <div style="margin-top:14px">${body()}</div>
     ${!S.chatLoading && S.chatTab !== 'activity' ? `<button class="btn-ghost" data-export="${esc(S.chat.chatId)}" style="margin:6px 16px 0;width:calc(100% - 32px)">
       ${sv('download',15,'var(--green)')} Скачать чат файлом (сообщения + фото + голосовые)</button>` : ''}`;
@@ -670,7 +759,249 @@ function Profile() {
       </div>
     </div>
 
+    ${communityCard()}
+
+    <div class="card" style="margin:12px 16px 0;overflow:hidden">
+      <button class="row" data-tab="privacy" style="width:100%;text-align:left">
+        <span class="chip" style="width:32px;height:32px;border-radius:11px;background:var(--g-cyan)">${sv('lock',15,'#fff',2.3)}</span>
+        <span class="row-main"><span class="row-title">Конфиденциальность</span>
+        <span class="row-sub">Что хранится и как удалить данные</span></span>
+        ${sv('arrow',13,'var(--txt-lo)')}
+      </button>
+    </div>
+
     <div class="note" style="margin:18px 16px 0;text-align:center">BestSave · бесплатная версия</div>`;
+}
+
+// Удаление всех данных. Спрашиваем подтверждение и показываем, что именно
+// удалилось, — чтобы результат был виден, а не «готово».
+async function eraseAll() {
+  const ok = await new Promise((resolve) => {
+    if (tg?.showPopup) {
+      tg.showPopup({
+        title: 'Удалить все данные?',
+        message: 'Архив, привязки чатов и настройки будут стёрты без возможности восстановления.',
+        buttons: [
+          { id: 'yes', type: 'destructive', text: 'Удалить' },
+          { id: 'no', type: 'cancel' },
+        ],
+      }, (id) => resolve(id === 'yes'));
+    } else {
+      resolve(window.confirm('Удалить все данные? Восстановить будет нельзя.'));
+    }
+  });
+  if (!ok) return;
+
+  try {
+    const r = await apiPost('/api/erase', { confirm: 'УДАЛИТЬ' });
+    const msg = `Удалено: ${fmt(r.messages)} сообщений, ${fmt(r.chats)} чатов.`;
+    if (tg?.showAlert) tg.showAlert(msg); else alert(msg);
+    // Состояние обнуляем и перезагружаем: архив теперь пуст
+    S.stats = null; S.chats = []; S.me = null; S.events = null; S.settings = null;
+    S.tab = 'home';
+    await loadAll();
+  } catch (e) {
+    const msg = 'Не удалось удалить: ' + e.message;
+    if (tg?.showAlert) tg.showAlert(msg); else alert(msg);
+  }
+}
+
+/* ── Админка (только для владельца) ── */
+// Показывает эксплуатационные метрики. Содержимого переписки здесь нет
+// намеренно — см. комментарий в lib/handlers/admin.js.
+async function loadAdmin() {
+  if (S.admin) return;
+  try { S.admin = await api('/api/admin'); }
+  catch (e) { S.admin = { error: e.message }; }
+  render();
+}
+
+const fmtBytes = (n) => {
+  if (!n) return '0 Б';
+  const u = ['Б','КБ','МБ','ГБ'];
+  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  return (n / Math.pow(1024, i)).toFixed(i ? 1 : 0) + ' ' + u[i];
+};
+
+function Admin() {
+  const a = S.admin;
+  if (!a) { loadAdmin(); return spinner(); }
+  if (a.error) return errBox(a.error);
+
+  const u = a.users || {}, m = a.messages || {}, st = a.settings || {};
+  const card = (grad, icon, label, value, sub) => `
+    <div class="stat" data-stagger>
+      <div class="head"><span class="chip" style="width:24px;height:24px;background:${grad}">${sv(icon,12,'#fff',2.4)}</span>${label}</div>
+      <div class="num">${value}</div>
+      ${sub ? `<div style="font-size:11.5px;color:var(--txt-lo);margin-top:6px;font-weight:600">${sub}</div>` : ''}
+    </div>`;
+
+  // Оценка заполнения бесплатного тарифа Postgres (обычно 256 МБ у Neon free,
+  // 512 МБ у Supabase). Порог берём консервативно — 256 МБ.
+  const LIMIT = 256 * 1024 * 1024;
+  const pct = Math.min(100, Math.round((a.storage.dbBytes / LIMIT) * 100));
+
+  const growthVals = a.growth.map((g) => g.n);
+  const volumeVals = a.volume.map((v) => v.n);
+
+  return `
+    <div class="sec">Пользователи</div>
+    <div class="grid2">
+      ${card('var(--g-purple)','user','Всего', fmt(u.total), `+${fmt(u.today)} за сутки`)}
+      ${card('var(--g-green)','bolt','Активны за неделю', fmt(a.activeWeek), 'приходили сообщения')}
+      ${card('var(--g-cyan)','clock','За 7 дней', fmt(u.week), 'новых')}
+      ${card('var(--g-orange)','clock','За 30 дней', fmt(u.month), 'новых')}
+    </div>
+
+    ${growthVals.length ? barChart(growthVals,
+      a.growth.map((g,i) => i % 5 === 0 ? new Date(g.day).getDate() : ''),
+      'Регистрации за 30 дней',
+      `Всего за период: ${fmt(growthVals.reduce((x,y)=>x+y,0))}`) : ''}
+
+    <div class="sec">Архив</div>
+    <div class="grid2">
+      ${card('var(--g-purple)','doc','Сообщений', fmt(m.total), `+${fmt(m.today)} за сутки`)}
+      ${card('var(--g-pink)','trash','Удалённых', fmt(m.deleted), 'спасено ботом')}
+      ${card('var(--g-cyan)','image','С медиа', fmt(m.media), '')}
+      ${card('var(--g-orange)','pencil','Изменённых', fmt(m.edited), '')}
+    </div>
+
+    ${volumeVals.length ? barChart(volumeVals,
+      a.volume.map((v,i) => i % 3 === 0 ? new Date(v.day).getDate() : ''),
+      'Поток сообщений за 14 дней',
+      `Пик: ${fmt(Math.max(...volumeVals))} в день`) : ''}
+
+    <div class="sec">Подключения</div>
+    <div class="card" style="margin:0 16px;overflow:hidden" data-stagger>
+      <div class="row">
+        <span class="chip" style="width:32px;height:32px;border-radius:11px;background:var(--g-cyan)">${sv('tg',15,'#fff',2.3)}</span>
+        <span class="row-main"><span class="row-title">Telegram Business</span>
+        <span class="row-sub">${fmt(a.connections.enabled)} активных из ${fmt(a.connections.total)}</span></span>
+      </div>
+      ${a.chats.map((c) => `<div class="div"></div>
+        <div class="row">
+          <span class="chip" style="width:32px;height:32px;border-radius:11px;background:var(--g-purple)">${sv('chat',15,'#fff',2.3)}</span>
+          <span class="row-main"><span class="row-title">${c.type === 'private' ? 'Личные чаты' : c.type === 'channel' ? 'Каналы' : 'Группы'}</span>
+          <span class="row-sub">подключено: ${fmt(c.n)}</span></span>
+        </div>`).join('')}
+    </div>
+
+    <div class="sec">Хранилище</div>
+    <div class="card" style="margin:0 16px;padding:18px" data-stagger>
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:12px">
+        <span style="font-size:15px;font-weight:800;font-family:'Nunito'">${fmtBytes(a.storage.dbBytes)}</span>
+        <span style="font-size:12px;color:${pct > 80 ? 'var(--red)' : 'var(--txt-lo)'};font-weight:700">${pct}% от 256 МБ</span>
+      </div>
+      <div style="height:10px;border-radius:99px;background:var(--glass-hi);overflow:hidden">
+        <div style="height:100%;width:${pct}%;border-radius:99px;
+          background:${pct > 80 ? 'var(--g-pink)' : pct > 50 ? 'var(--g-orange)' : 'var(--g-green)'};
+          transition:width .6s var(--spring)"></div>
+      </div>
+      <div class="note" style="margin-top:12px">
+        Таблица сообщений: ${fmtBytes(a.storage.messagesBytes)}, из них текст — ${fmtBytes(a.storage.textBytes)}.
+        Порог 256 МБ взят по нижней границе бесплатных тарифов Postgres —
+        сверьтесь со своим провайдером.
+      </div>
+    </div>
+
+    <div class="sec">Использование настроек</div>
+    <div class="card" style="margin:0 16px;padding:18px" data-stagger>
+      <div class="note" style="line-height:2">
+        Уведомления об удалении: <b style="color:var(--txt)">${fmt(st.notify_deleted)}</b><br>
+        Об изменении: <b style="color:var(--txt)">${fmt(st.notify_edited)}</b><br>
+        Фейк-контроль: <b style="color:var(--txt)">${fmt(st.notify_fake)}</b><br>
+        Тихие часы: <b style="color:var(--txt)">${fmt(st.quiet_hours)}</b>
+      </div>
+    </div>
+
+    ${m.quarantined ? `
+      <div class="card" style="margin:12px 16px 0;padding:17px;border-color:rgba(251,146,60,.4)" data-stagger>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:9px">
+          ${sv('alert',16,'var(--orange)')}
+          <span style="font-size:14px;font-weight:800;font-family:'Nunito';color:var(--orange-2)">Спорные копии: ${fmt(m.quarantined)}</span>
+        </div>
+        <div class="note">
+          Сообщения из чатов, подключённых несколькими пользователями до
+          разделения архивов. Владельца установить нельзя, поэтому они скрыты
+          у всех. Данные не удалены.
+        </div>
+      </div>` : ''}
+
+    <div class="note" style="margin:18px 16px 0;text-align:center">
+      Обновлено ${new Date(a.generatedAt).toLocaleString('ru-RU')}<br>
+      Содержимое переписки пользователей здесь не отображается.
+    </div>`;
+}
+
+/* ── Конфиденциальность ── */
+// Текст описывает то, что приложение делает на самом деле: перечень полей
+// совпадает со схемой базы. Обещаний, которых код не выполняет, здесь нет.
+function Privacy() {
+  const block = (icon, grad, title, body) => `
+    <div class="card" style="margin:0 16px 10px;padding:17px" data-stagger>
+      <div style="display:flex;align-items:center;gap:11px;margin-bottom:11px">
+        <span class="chip" style="width:34px;height:34px;border-radius:12px;background:${grad}">${sv(icon,16,'#fff',2.3)}</span>
+        <span style="font-size:15px;font-weight:800;font-family:'Nunito'">${title}</span>
+      </div>
+      <div class="note">${body}</div>
+    </div>`;
+
+  return `
+    <div class="sec">Что хранится</div>
+    ${block('doc','var(--g-purple)','Сообщения из подключённых чатов', `
+      Текст, имя и ID отправителя, время отправки, отметки об удалении и
+      правке, а для отредактированных — прежняя версия текста.
+      Только те сообщения, что пришли <b style="color:var(--txt)">после</b> подключения:
+      выгружать прошлую переписку Telegram ботам не даёт.`)}
+
+    ${block('image','var(--g-cyan)','Файлы — ссылками, не копиями', `
+      Фото, голосовые и видео на сервере BestSave
+      <b style="color:var(--txt)">не хранятся</b>. Сохраняется только выданный
+      Telegram идентификатор файла: по нему приложение подгружает вложение
+      из Telegram в момент просмотра. Сами файлы остаются на серверах Telegram.`)}
+
+    ${block('user','var(--g-green)','Профиль', `
+      Ваш Telegram ID, имя и username, признак Premium, настройки уведомлений
+      и часовой пояс — он нужен, чтобы тихие часы работали по местному времени.
+      Аватар не хранится: он запрашивается у Telegram при открытии экрана.`)}
+
+    <div class="sec">Кто это видит</div>
+    ${block('lock','var(--g-pink)','Только вы', `
+      Архив личных чатов привязан к владельцу. Если ваш собеседник тоже
+      пользуется BestSave и переписывается с тем же человеком, вы
+      <b style="color:var(--txt)">не увидите</b> его переписку, а он — вашу.
+      Данные не продаются, не передаются третьим лицам, рекламы и внешней
+      аналитики в приложении нет.`)}
+
+    ${block('alert','var(--g-orange)','О чём стоит помнить', `
+      В архив попадают сообщения вашего собеседника, и Telegram его об этом
+      не уведомляет. Ответственность за то, как вы используете сохранённую
+      переписку, лежит на вас. В некоторых странах запись и хранение личной
+      переписки без согласия второй стороны ограничены законом — проверьте
+      правила вашей юрисдикции.`)}
+
+    <div class="sec">Где и сколько</div>
+    ${block('shield','var(--g-purple)','Хранение', `
+      Данные лежат в базе PostgreSQL, приложение работает на Vercel.
+      Срок хранения не ограничен: архив существует, пока вы его не удалите.
+      Отключение бота в Telegram Business останавливает запись новых
+      сообщений, но уже сохранённое остаётся, пока вы не удалите его сами.`)}
+
+    <div class="sec">Удаление</div>
+    <div class="card" style="margin:0 16px;padding:17px" data-stagger>
+      <div class="note" style="margin-bottom:14px">
+        Удаляются: весь ваш личный архив, привязки чатов, бизнес-подключения
+        и учётная запись с настройками. Действие необратимо — выгрузите нужные
+        чаты заранее кнопкой «Скачать чат».
+      </div>
+      <button class="btn-danger" data-erase>${sv('trash',16,'#fff',2.4)} Удалить все мои данные</button>
+    </div>
+
+    ${communityCard()}
+
+    <div class="note" style="margin:18px 16px 0;text-align:center">
+      Вопросы о данных — в поддержку @Business_Senior
+    </div>`;
 }
 
 /* ── Настройки ── */
@@ -700,22 +1031,85 @@ function Settings() {
       только там Telegram присылает событие удаления в момент удаления.
     </div>
 
+    <div class="sec">Не беспокоить</div>
+    <div class="card" style="margin:0 16px;overflow:hidden">
+      ${row('quietHours','Тихие часы',
+        `Ночью бот молчит: с ${String(s.quietFrom).padStart(2,'0')}:00 до ${String(s.quietTo).padStart(2,'0')}:00`,
+        s.quietHours)}
+    </div>
+    <div class="note" style="margin:10px 16px 0">
+      Время считается по вашему часовому поясу${quietTzLabel()}.
+      События всё равно сохраняются в архив — утром увидите их в приложении,
+      просто без ночных сообщений.
+    </div>
+
     <div class="sec">Данные</div>
     <div class="card" style="margin:0 16px;overflow:hidden">
       <button class="row" data-reload style="width:100%;text-align:left">
-        <span class="chip" style="width:30px;height:30px;border-radius:10px;background:var(--green-soft);border:1px solid var(--green-line)">${sv('refresh',14,'var(--green)')}</span>
+        <span class="chip" style="width:32px;height:32px;border-radius:11px;background:var(--g-green)">${sv('refresh',15,'#fff',2.3)}</span>
         <span class="row-main"><span class="row-title">Обновить архив</span>
         <span class="row-sub">Перечитать чаты и статистику с сервера</span></span>
       </button>
       <div class="div"></div>
       <button class="row" data-tab="profile" style="width:100%;text-align:left">
-        <span class="chip" style="width:30px;height:30px;border-radius:10px;background:var(--surf-hi)">${sv('user',14,'var(--txt-lo)')}</span>
+        <span class="chip" style="width:32px;height:32px;border-radius:11px;background:var(--g-purple)">${sv('user',15,'#fff',2.3)}</span>
         <span class="row-main"><span class="row-title">Профиль и подключение</span>
         <span class="row-sub">Аватар, архив, Telegram Business</span></span>
         ${sv('arrow',13,'var(--txt-lo)')}
       </button>
+      <div class="div"></div>
+      <button class="row" data-tab="privacy" style="width:100%;text-align:left">
+        <span class="chip" style="width:32px;height:32px;border-radius:11px;background:var(--g-cyan)">${sv('lock',15,'#fff',2.3)}</span>
+        <span class="row-main"><span class="row-title">Конфиденциальность</span>
+        <span class="row-sub">Что хранится, где и как это удалить</span></span>
+        ${sv('arrow',13,'var(--txt-lo)')}
+      </button>
     </div>
+
+    ${S.isAdmin ? `
+    <div class="sec">Владелец</div>
+    <div class="card" style="margin:0 16px;overflow:hidden">
+      <button class="row" data-tab="admin" style="width:100%;text-align:left">
+        <span class="chip" style="width:32px;height:32px;border-radius:11px;background:var(--g-hero)">${sv('bolt',15,'#fff',2.3)}</span>
+        <span class="row-main"><span class="row-title">Панель владельца</span>
+        <span class="row-sub">Метрики продукта, нагрузка, хранилище</span></span>
+        ${sv('arrow',13,'var(--txt-lo)')}
+      </button>
+    </div>` : ''}
+
+    ${communityCard()}
+
     ${s.offline ? `<div class="note" style="margin:12px 16px 0;color:var(--red)">Настройки сейчас не сохраняются на сервере — нет связи. Изменения применятся при восстановлении.</div>` : ''}`;
+}
+
+// Подпись пояса: показываем реальное смещение устройства, чтобы «тихие часы»
+// не выглядели абстракцией.
+function quietTzLabel() {
+  const off = -new Date().getTimezoneOffset(); // минуты к востоку от UTC
+  const sign = off >= 0 ? '+' : '−';
+  const h = Math.floor(Math.abs(off) / 60), m = Math.abs(off) % 60;
+  return ` (UTC${sign}${h}${m ? ':' + String(m).padStart(2,'0') : ''})`;
+}
+
+// Ссылки на сообщество — одинаковые на нескольких экранах.
+function communityCard() {
+  return `
+    <div class="sec">Сообщество</div>
+    <div class="card" style="margin:0 16px;overflow:hidden">
+      <a class="row" href="https://t.me/bestsavee" target="_blank" rel="noopener" data-tglink>
+        <span class="chip" style="width:32px;height:32px;border-radius:11px;background:var(--g-cyan)">${sv('tg',15,'#fff',2.3)}</span>
+        <span class="row-main"><span class="row-title">Канал BestSave</span>
+        <span class="row-sub">Обновления, новые функции, планы</span></span>
+        ${sv('arrow',13,'var(--txt-lo)')}
+      </a>
+      <div class="div"></div>
+      <a class="row" href="https://t.me/Business_Senior" target="_blank" rel="noopener" data-tglink>
+        <span class="chip" style="width:32px;height:32px;border-radius:11px;background:var(--g-orange)">${sv('chat',15,'#fff',2.3)}</span>
+        <span class="row-main"><span class="row-title">Поддержка</span>
+        <span class="row-sub">@Business_Senior — вопросы и проблемы</span></span>
+        ${sv('arrow',13,'var(--txt-lo)')}
+      </a>
+    </div>`;
 }
 
 /* ── Уведомления ── */
@@ -762,7 +1156,8 @@ function render() {
   if (S.loading) { main.innerHTML = spinner(); return; }
   if (S.error && !S.stats) { main.innerHTML = errBox(S.error); return; }
   const screens = { home:Home, chats:Chats, chatview:ChatView, events:Events, ai:AI,
-    profile:Profile, settings:Settings, notifications:Notifications };
+    profile:Profile, settings:Settings, notifications:Notifications, privacy:Privacy,
+    admin:Admin };
   main.innerHTML = (screens[S.tab] || Home)();
 
   // Визуальный слой: живые счётчики + каскад карточек после отрисовки.
@@ -772,17 +1167,26 @@ function render() {
 
 /* ── события ── */
 document.addEventListener('click', (e) => {
-  const el = e.target.closest('[data-tab],[data-open],[data-ctab],[data-reload],[data-addbot],[data-export],[data-toggle],[data-clear-search]');
+  const el = e.target.closest('[data-tab],[data-open],[data-ctab],[data-reload],[data-addbot],[data-export],[data-toggle],[data-clear-search],[data-erase],[data-tglink],[data-pin],[data-clear-msgsearch]');
   if (!el) return;
   if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
 
   if (el.dataset.addbot !== undefined && tg?.openTelegramLink) {
     e.preventDefault(); tg.openTelegramLink(el.getAttribute('href')); return;
   }
+  // Ссылки на канал и поддержку открываем внутри Telegram, а не в браузере
+  if (el.dataset.tglink !== undefined) {
+    const href = el.getAttribute('href');
+    if (tg?.openTelegramLink) { e.preventDefault(); tg.openTelegramLink(href); }
+    return;
+  }
+  if (el.dataset.erase !== undefined) { eraseAll(); return; }
+  if (el.dataset.pin) { togglePin(Number(el.dataset.pin)); return; }
+  if (el.dataset.clearMsgsearch !== undefined) { S.msgSearch = ''; loadMessages(); return; }
   if (el.dataset.export) { downloadChat(el.dataset.export); return; }
   if (el.dataset.toggle) { toggleSetting(el.dataset.toggle); return; }
   if (el.dataset.clearSearch !== undefined) { S.chatSearch = ''; render(); return; }
-  if (el.dataset.reload !== undefined) { S.events = null; S.settings = null; loadAll(); return; }
+  if (el.dataset.reload !== undefined) { S.events = null; S.settings = null; S.admin = null; loadAll(); return; }
   if (el.dataset.open) { openChat(el.dataset.open); return; }
   if (el.dataset.ctab) {
     S.chatTab = el.dataset.ctab;
@@ -792,8 +1196,8 @@ document.addEventListener('click', (e) => {
   if (el.dataset.tab) {
     const to = el.dataset.tab;
     // Запоминаем, откуда пришли в настройки/уведомления — туда и вернёмся
-    if ((to === 'settings' || to === 'notifications') &&
-        S.tab !== 'settings' && S.tab !== 'notifications') {
+    const overlay = ['settings','notifications','privacy','admin'];
+    if (overlay.includes(to) && !overlay.includes(S.tab)) {
       S.prevTab = S.tab === 'chatview' ? 'chats' : S.tab;
     }
     S.tab = to;
@@ -802,17 +1206,41 @@ document.addEventListener('click', (e) => {
     window.scrollTo({ top: 0 });
     if (S.tab === 'events') loadEvents();
     if (S.tab === 'settings') loadSettings();
+    if (S.tab === 'admin') { S.admin = null; loadAdmin(); }
   }
 });
 
-// Поиск по чатам: фильтруем на вводе, не теряя фокус и позицию курсора
+// Отложенный запуск серверного поиска по сообщениям
+let msgSearchTimer = null;
+
+// Поиск по чатам: фильтруем на месте, не теряя фокус и позицию курсора
 document.addEventListener('input', (e) => {
-  if (e.target.id !== 'chat-search') return;
-  S.chatSearch = e.target.value;
-  const pos = e.target.selectionStart;
-  render();
-  const input = document.getElementById('chat-search');
-  if (input) { input.focus(); try { input.setSelectionRange(pos, pos); } catch {} }
+  if (e.target.id === 'chat-search') {
+    S.chatSearch = e.target.value;
+    const pos = e.target.selectionStart;
+    render();
+    const input = document.getElementById('chat-search');
+    if (input) { input.focus(); try { input.setSelectionRange(pos, pos); } catch {} }
+    return;
+  }
+
+  // Поиск по сообщениям идёт на сервер, поэтому запрос откладываем:
+  // без задержки каждый символ порождал бы обращение к базе.
+  if (e.target.id === 'msg-search') {
+    S.msgSearch = e.target.value;
+    clearTimeout(msgSearchTimer);
+    msgSearchTimer = setTimeout(() => {
+      loadMessages().then(() => {
+        // Возвращаем фокус: render() пересобирает разметку
+        const input = document.getElementById('msg-search');
+        if (input && document.activeElement !== input) {
+          input.focus();
+          const v = input.value;
+          try { input.setSelectionRange(v.length, v.length); } catch {}
+        }
+      });
+    }, 350);
+  }
 });
 
 /* ── старт ── */

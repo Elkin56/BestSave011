@@ -136,19 +136,38 @@ function readHandlers() {
 describe('запросы к message ограничены владельцем', () => {
   const READS_MESSAGES = /FROM\s+message\b/i;
 
+  // Единственное исключение: панель владельца считает агрегаты по всей базе.
+  // Оно безопасно ровно до тех пор, пока оттуда не возвращаются строки —
+  // это проверяется отдельно тестом «только агрегаты» ниже.
+  const AGGREGATE_ONLY = new Set(['admin.js']);
+
   test('каждый обработчик, читающий message, применяет VISIBLE', () => {
     const offenders = [];
     for (const { name, src } of readHandlers()) {
       if (!READS_MESSAGES.test(src)) continue;
-      // Правило может подставляться как ${VISIBLE} в шаблон или передаваться
-      // идентификатором в список условий — важно, что оно импортировано
-      // из lib/db.js и действительно используется.
+      if (AGGREGATE_ONLY.has(name)) continue;
       const imported = /import\s*\{[^}]*\bVISIBLE\b[^}]*\}\s*from\s*'\.\.\/db\.js'/.test(src);
       const used = (src.match(/\bVISIBLE\b/g) || []).length >= 2;
       if (!imported || !used) offenders.push(name);
     }
     assert.deepEqual(offenders, [],
       `эти обработчики читают message без фильтра владельца: ${offenders.join(', ')}`);
+  });
+
+  test('исключение из правила возвращает только агрегаты', () => {
+    // Страховка для AGGREGATE_ONLY: если однажды в админку добавят выборку
+    // строк, тест упадёт и заставит либо убрать её, либо пересмотреть решение.
+    for (const name of AGGREGATE_ONLY) {
+      const src = readFileSync(join(HANDLERS, name), 'utf8');
+      // Каждое поле в SELECT из message должно быть агрегатом или датой,
+      // а звёздочка и выборка колонок сообщений запрещены.
+      assert.doesNotMatch(src, /SELECT\s+\*/i, `${name}: SELECT * запрещён`);
+      assert.doesNotMatch(src, /\bSELECT\s+m\.\w+\s*(,|FROM)/i,
+        `${name}: выборка колонок сообщений запрещена`);
+      // Отсутствие LIMIT-выборок строк из message
+      assert.doesNotMatch(src, /FROM\s+message[\s\S]{0,200}?\bLIMIT\b/i,
+        `${name}: выборка строк из message запрещена`);
+    }
   });
 
   test('в обработчиках не осталось выборки только по chat_id', () => {
@@ -283,8 +302,238 @@ describe('аватар собеседника', () => {
     assert.match(src, /Number\.isFinite\(peer\)/);
   });
 
+  test('фото чата отдаётся только для привязанных чатов', () => {
+    // Иначе по /api/avatar?chat=<любой id> можно было бы получить
+    // аватар произвольного чата или человека
+    assert.match(src, /WHERE u\.tg_id = \$1 AND c\.tg_chat_id = \$2/);
+    assert.match(src, /not your chat/);
+  });
+
+  test('тип чата решает, чьё фото запрашивать', () => {
+    // В личном чате tg_chat_id совпадает с id собеседника,
+    // у групп фото берётся через getChat
+    assert.match(src, /type === 'private'/);
+    assert.match(src, /getChat/);
+  });
+
+  test('нечисловой chat не уходит в Telegram', () => {
+    assert.match(src, /Number\.isFinite\(targetId\)/);
+  });
+
   test('senderId отдаётся строкой, а не числом', () => {
     // BIGINT в JSON теряет точность как number — сериализуем строкой
     assert.match(msgs, /senderId: r\.sender_tg_id \? String\(r\.sender_tg_id\) : null/);
+  });
+});
+
+/* ─────────────────────────────────────────────
+   6. Тихие часы
+   ───────────────────────────────────────────── */
+
+import { isQuietNow } from '../lib/quiet.js';
+
+describe('тихие часы', () => {
+  // Самара: UTC+4 → смещение +240 минут
+  const samara = { quietHours: true, quietFrom: 23, quietTo: 8, tzOffsetMin: 240 };
+  const at = (utc) => new Date(utc);
+
+  test('выключенные тихие часы не молчат никогда', () => {
+    const off = { ...samara, quietHours: false };
+    assert.equal(isQuietNow(off, at('2026-07-23T21:00:00Z')), false); // 01:00 по Самаре
+  });
+
+  test('окно через полночь: 01:00 местного — тихо', () => {
+    // 21:00 UTC = 01:00 следующего дня в Самаре
+    assert.equal(isQuietNow(samara, at('2026-07-23T21:00:00Z')), true);
+  });
+
+  test('23:00 ровно — уже тихо', () => {
+    // 19:00 UTC = 23:00 по Самаре
+    assert.equal(isQuietNow(samara, at('2026-07-23T19:00:00Z')), true);
+  });
+
+  test('08:00 ровно — уже можно писать', () => {
+    // 04:00 UTC = 08:00 по Самаре
+    assert.equal(isQuietNow(samara, at('2026-07-23T04:00:00Z')), false);
+  });
+
+  test('07:59 — ещё тихо', () => {
+    assert.equal(isQuietNow(samara, at('2026-07-23T03:59:00Z')), true);
+  });
+
+  test('день — не тихо', () => {
+    // 10:00 UTC = 14:00 по Самаре
+    assert.equal(isQuietNow(samara, at('2026-07-23T10:00:00Z')), false);
+  });
+
+  test('часовой пояс действительно учитывается', () => {
+    const utc = { ...samara, tzOffsetMin: 0 };
+    const moment = at('2026-07-23T21:00:00Z'); // 01:00 в Самаре, 21:00 по UTC
+    assert.equal(isQuietNow(samara, moment), true);   // тихо у самарца
+    assert.equal(isQuietNow(utc, moment), false);     // но не у пользователя UTC
+  });
+
+  test('отрицательное смещение (западнее UTC)', () => {
+    const ny = { quietHours: true, quietFrom: 23, quietTo: 8, tzOffsetMin: -240 };
+    // 04:00 UTC = 00:00 в Нью-Йорке → тихо
+    assert.equal(isQuietNow(ny, at('2026-07-23T04:00:00Z')), true);
+    // 16:00 UTC = 12:00 → не тихо
+    assert.equal(isQuietNow(ny, at('2026-07-23T16:00:00Z')), false);
+  });
+
+  test('обычное окно внутри суток (1→6) тоже работает', () => {
+    const day = { quietHours: true, quietFrom: 1, quietTo: 6, tzOffsetMin: 0 };
+    assert.equal(isQuietNow(day, at('2026-07-23T03:00:00Z')), true);
+    assert.equal(isQuietNow(day, at('2026-07-23T07:00:00Z')), false);
+    assert.equal(isQuietNow(day, at('2026-07-23T23:00:00Z')), false);
+  });
+
+  test('пустое окно (from === to) тишины не даёт', () => {
+    const empty = { quietHours: true, quietFrom: 8, quietTo: 8, tzOffsetMin: 0 };
+    assert.equal(isQuietNow(empty, at('2026-07-23T08:00:00Z')), false);
+  });
+});
+
+describe('уведомления уважают тихие часы', () => {
+  const bot = readFileSync(join(ROOT, 'api', 'bot.js'), 'utf8');
+
+  test('все три уведомления проверяют тишину', () => {
+    // Удаление, изменение и фейк-контроль — ни одно не должно будить ночью
+    const gates = bot.match(/isQuietNow\(s\)/g) || [];
+    assert.ok(gates.length >= 3, `ожидалось 3+ проверок, найдено ${gates.length}`);
+  });
+});
+
+describe('удаление данных', () => {
+  const db = readFileSync(join(ROOT, 'lib', 'db.js'), 'utf8');
+  const h = readFileSync(join(ROOT, 'lib', 'handlers', 'erase.js'), 'utf8');
+
+  test('требуется явное подтверждение', () => {
+    assert.match(h, /confirmation required/);
+    assert.match(h, /body\.confirm !== CONFIRM_WORD/);
+  });
+
+  test('удаляется личный архив именно этого владельца', () => {
+    const fn = db.slice(db.indexOf('export async function eraseUserData'));
+    assert.match(fn.slice(0, 1400), /DELETE FROM message WHERE owner_tg_id = \$1/);
+  });
+
+  test('чужой общий архив не сносится', () => {
+    // Групповые сообщения удаляются только вместе с осиротевшим чатом
+    const fn = db.slice(db.indexOf('export async function eraseUserData'));
+    assert.match(fn.slice(0, 1600), /NOT EXISTS \(SELECT 1 FROM chat_link/);
+  });
+});
+
+/* ─────────────────────────────────────────────
+   7. Админка
+   ───────────────────────────────────────────── */
+
+describe('панель владельца', () => {
+  const src = readFileSync(join(ROOT, 'lib', 'handlers', 'admin.js'), 'utf8');
+  const auth = readFileSync(join(ROOT, 'lib', 'auth.js'), 'utf8');
+
+  // Поведение проверки доступа проверяется настоящими попытками входа
+  // в test/admin-security.test.js. Здесь — только то, что атаками не ловится:
+  // граница по содержимому и использование строгой калитки.
+
+  test('используется строгая проверка, а не обычная авторизация', () => {
+    assert.match(src, /requireAdmin\(req, res\)/);
+    // requireAuth пустил бы любого авторизованного пользователя
+    assert.doesNotMatch(src, /requireAuth\(req, res\)/);
+  });
+
+  test('калитка требует и список, и свежесть', () => {
+    assert.match(auth, /ADMIN_TG_IDS/);
+    assert.match(auth, /ADMIN_MAX_AGE_SEC/);
+  });
+
+  test('не отдаёт содержимое переписки', () => {
+    // Никаких выборок текста, медиа-идентификаторов или названий чатов:
+    // политика обещает, что архив виден только владельцу.
+    assert.doesNotMatch(src, /SELECT[^;]*\bm\.text\b/i);
+    assert.doesNotMatch(src, /media_file_id/);
+    assert.doesNotMatch(src, /media_unique_id/);
+    assert.doesNotMatch(src, /sender_name/);
+    assert.doesNotMatch(src, /c\.title/);
+  });
+
+  test('текст читается только как размер, не как содержимое', () => {
+    // pg_column_size(text) даёт объём в байтах — сам текст не покидает БД
+    assert.match(src, /pg_column_size\(text\)/);
+  });
+
+  test('флаг isAdmin на клиенте не даёт прав', () => {
+    const me = readFileSync(join(ROOT, 'lib', 'handlers', 'me.js'), 'utf8');
+    assert.match(me, /isAdmin/);
+    // Решение принимает сервер, независимо от присланного клиентом
+    assert.match(auth, /admins\.includes\(String\(result\.user\.id\)\)/);
+  });
+});
+
+/* ─────────────────────────────────────────────
+   8. Закрепление и поиск
+   ───────────────────────────────────────────── */
+
+describe('закрепление сообщений', () => {
+  const src = readFileSync(join(HANDLERS, 'pin.js'), 'utf8');
+  const db = readFileSync(join(ROOT, 'lib', 'db.js'), 'utf8');
+
+  test('закрепить можно только видимое сообщение', () => {
+    // Иначе по перебору id закреплялось бы (и раскрывалось) чужое
+    assert.match(src, /import \{[^}]*VISIBLE[^}]*\} from '\.\.\/db\.js'/);
+    assert.match(src, /m\.id = \$2 AND \$\{VISIBLE\}/);
+    assert.match(src, /not your message/);
+  });
+
+  test('закрепление принадлежит пользователю, а не сообщению', () => {
+    // Флаг в message закрепил бы групповое сообщение сразу всем участникам
+    assert.match(db, /CREATE TABLE IF NOT EXISTS message_pin/);
+    assert.match(db, /PRIMARY KEY \(user_tg_id, message_id\)/);
+    assert.doesNotMatch(db, /ALTER TABLE message ADD COLUMN IF NOT EXISTS is_pinned/);
+  });
+
+  test('нецелый msgId отклоняется', () => {
+    assert.match(src, /Number\.isInteger\(msgId\)/);
+  });
+
+  test('заметка обрезается по длине', () => {
+    assert.match(src, /slice\(0, NOTE_MAX\)/);
+  });
+});
+
+describe('поиск по сообщениям', () => {
+  const src = readFileSync(join(HANDLERS, 'messages.js'), 'utf8');
+
+  test('поиск не обходит правило видимости', () => {
+    // Условие поиска добавляется к тем же where, где живёт VISIBLE
+    assert.match(src, /where\.push\(`m\.text ILIKE/);
+    assert.ok((src.match(/\bVISIBLE\b/g) || []).length >= 2);
+  });
+
+  test('запрос уходит параметром, а не склейкой', () => {
+    assert.match(src, /params\.push\(`%\$\{escaped\}%`\)/);
+    assert.doesNotMatch(src, /ILIKE '%\$\{/);
+  });
+
+  test('спецсимволы LIKE экранируются', () => {
+    // Без этого «%» от пользователя выбрал бы весь архив,
+    // а «_» подменял бы любой символ
+    assert.match(src, /replace\(\/\(\[\\\\%_\]\)\/g/);
+  });
+
+  test('длина запроса ограничена', () => {
+    assert.match(src, /slice\(0, 100\)/);
+  });
+
+  test('фильтр закреплённых работает на сервере', () => {
+    assert.match(src, /filter === 'pinned'/);
+    assert.match(src, /LEFT JOIN message_pin p ON p\.message_id = m\.id AND p\.user_tg_id = \$1/);
+  });
+
+  test('голосовые фильтруются в запросе, а не после пагинации', () => {
+    // Раньше клиент отбрасывал часть уже полученной страницы,
+    // из-за чего выдача приходила неполной
+    assert.match(src, /filter === 'voices'/);
   });
 });

@@ -164,19 +164,27 @@
   .row:active{background:var(--glass-hi)}
   .row-main{flex:1;min-width:0}
   .row-title{display:block;font-size:15px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .row-sub{display:block;font-size:12px;color:var(--txt-lo);margin-top:3px;font-weight:600}
+  .row-sub{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;
+    color:var(--txt-dim);margin-top:5px;font-weight:600}
   .row-side{display:flex;gap:7px;flex-shrink:0;align-items:center}
-  .ava{width:46px;height:46px;border-radius:16px;flex-shrink:0;background:var(--g-purple);
+  /* Аватар: фото поверх цветной подложки с буквой. Подложка своя у каждого
+     чата — иначе список выглядит как ряд одинаковых плиток. */
+  .ava{position:relative;width:46px;height:46px;border-radius:16px;flex-shrink:0;overflow:hidden;
     display:flex;align-items:center;justify-content:center;font-family:'Nunito';font-weight:900;
-    font-size:17px;color:#fff;box-shadow:0 6px 16px rgba(124,58,237,.4),inset 0 1px 0 rgba(255,255,255,.35)}
+    font-size:17px;color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.28)}
+  .ava img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 
-  /* ── Теги ── */
-  .tag{display:inline-flex;align-items:center;gap:3px;font-size:10.5px;font-weight:900;
-    border-radius:9px;padding:3px 8px;box-shadow:inset 0 1px 0 rgba(255,255,255,.15)}
-  .tag.red{color:#fff;background:var(--g-pink)}
-  .tag.violet{color:#fff;background:var(--g-purple)}
-  .tag.biz{color:#fff;background:var(--g-cyan)}
-  .tag.gold{color:#4A2F00;background:linear-gradient(135deg,#FCD34D,#F59E0B)}
+  /* ── Теги ──
+     Второстепенная информация: приглушены, чтобы не спорить с названием
+     чата. Цвет несёт смысл, но приходит из текста и полупрозрачной
+     подложки, а не из плотной заливки. */
+  .tag{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:700;
+    border-radius:8px;padding:3px 7px;background:rgba(255,255,255,.07);
+    border:1px solid rgba(255,255,255,.08);color:var(--txt-dim)}
+  .tag.red{color:#F9A8C4}
+  .tag.violet{color:#C4B5FD}
+  .tag.biz{color:#93C5D8}
+  .tag.gold{color:#FCD34D}
 
   /* ── Фильтры-пилюли ── */
   .filters{display:flex;gap:9px;overflow-x:auto;padding:16px 16px 6px;scrollbar-width:none}
@@ -193,6 +201,18 @@
   .msg{border-radius:22px !important}
   .msg.del{border-color:rgba(251,113,133,.4);
     background:linear-gradient(135deg,rgba(251,113,133,.14),var(--glass))}
+  /* Закреплённое: тёплая рамка, чтобы находилось взглядом среди тысяч */
+  .msg.pinned{border-color:rgba(251,191,36,.5);
+    box-shadow:var(--shadow),0 0 0 1px rgba(251,191,36,.2)}
+  .pin-btn{width:28px;height:28px;border-radius:9px;flex-shrink:0;
+    display:flex;align-items:center;justify-content:center;
+    background:var(--glass-hi);border:1px solid var(--glass-line);
+    transition:transform .3s var(--spring),background .2s}
+  .pin-btn:active{transform:scale(.85)}
+  .pin-btn.on{background:linear-gradient(135deg,#FCD34D,#F59E0B);border-color:transparent;
+    box-shadow:0 4px 12px rgba(245,158,11,.45)}
+  mark{background:rgba(251,191,36,.28);color:#FDE68A;border-radius:4px;padding:0 2px;
+    font-weight:700}
   .msg-head{display:flex;align-items:center;gap:8px;margin-bottom:7px;flex-wrap:wrap}
   .msg-who{font-size:13px;font-weight:800}
   /* Аватар собеседника: фото перекрывает букву-заглушку; при ошибке
@@ -235,6 +255,12 @@
     font-size:14px;color:var(--txt);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
     transition:transform .35s var(--spring)}
   .btn-ghost:active{transform:scale(.96)}
+  /* Необратимое действие — отдельный вид, чтобы не путать с обычной кнопкой */
+  .btn-danger{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:16px;
+    background:var(--g-pink);color:#fff;font-weight:900;font-size:14.5px;border-radius:16px;
+    font-family:'Nunito';box-shadow:0 8px 22px rgba(219,39,119,.42),inset 0 1px 0 rgba(255,255,255,.3);
+    transition:transform .35s var(--spring)}
+  .btn-danger:active{transform:scale(.96)}
 
   /* ── Аватар профиля ── */
   .ava-ring{width:84px;height:84px;border-radius:28px;padding:3px;background:var(--g-hero);
@@ -281,9 +307,11 @@
   .toggle.on::after{transform:translateX(22px);background:#fff}
 
   /* ── Медиа ── */
-  .count-pill{flex-shrink:0;min-width:38px;text-align:center;padding:6px 11px;border-radius:99px;
-    font-size:13px;font-weight:900;color:#fff;background:var(--g-purple);
-    box-shadow:0 4px 12px rgba(124,58,237,.4)}
+  /* Счётчик сообщений: справочное число, а не акцент. Плотная заливка
+     перетягивала внимание с названия чата. */
+  .count-pill{flex-shrink:0;min-width:34px;text-align:center;padding:4px 9px;border-radius:9px;
+    font-size:12.5px;font-weight:700;color:var(--txt-lo);
+    background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.07)}
   .msg-media{margin-top:11px}
   .msg-media img{max-width:100%;max-height:340px;border-radius:16px;display:block;border:1px solid var(--glass-line)}
   .msg-media audio{width:100%;height:40px;display:block}
