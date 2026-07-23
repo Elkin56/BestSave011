@@ -361,6 +361,75 @@
     *{animation-duration:.01ms !important;transition-duration:.01ms !important;animation-iteration-count:1 !important}
     .cat,.hero-glow,.balance-orb,#app::before{animation:none !important}
   }
+
+  /* ══ Светлая тема админки ══
+     Отдельный визуальный слой в духе присланного концепта: воздушный
+     светлый фон, мягкие тени, крупный акцент «спасли N». Включается
+     классом на контейнере экрана и не затрагивает остальное приложение. */
+  .admin-light{
+    --al-bg:#F4F3FA; --al-card:#FFFFFF; --al-ink:#14121F; --al-ink-2:#6B6880;
+    --al-line:#ECEBF3; --al-violet:#7C6CF0; --al-violet-soft:#EEEBFB;
+    background:var(--al-bg);margin:0 -0px;padding:20px 16px 8px;color:var(--al-ink)}
+  .al-hi{font-size:26px;font-weight:900;font-family:'Nunito';letter-spacing:-.6px;line-height:1}
+  .al-sub{color:var(--al-ink-2);font-size:14px;font-weight:600;margin-top:4px}
+
+  .al-hero{background:var(--al-card);border-radius:26px;padding:22px;margin-bottom:14px;
+    box-shadow:0 10px 30px rgba(80,70,140,.08);display:flex;align-items:center;gap:16px;position:relative;overflow:hidden}
+  .al-hero-l{flex:1;min-width:0}
+  .al-hero .lbl{color:var(--al-ink-2);font-size:14px;font-weight:600}
+  .al-hero .big{font-family:'Nunito';font-size:64px;font-weight:900;line-height:.95;
+    letter-spacing:-2px;color:var(--al-ink);margin:2px 0}
+  .al-hero .cap{color:var(--al-ink-2);font-size:14px;font-weight:600}
+  .al-delta{display:inline-flex;align-items:center;gap:6px;margin-top:14px;padding:8px 14px;
+    border-radius:14px;background:var(--al-violet-soft);color:var(--al-violet);
+    font-weight:800;font-size:13px;font-variant-numeric:tabular-nums}
+  .al-shield{width:96px;height:96px;border-radius:50%;flex-shrink:0;
+    background:radial-gradient(circle at 50% 40%,#EDE9FC,#F4F3FA);
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:inset 0 2px 8px rgba(124,108,240,.12)}
+
+  .al-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+  .al-cell{background:var(--al-card);border-radius:18px;padding:14px 12px;
+    box-shadow:0 6px 18px rgba(80,70,140,.06)}
+  .al-cell .ic{width:34px;height:34px;border-radius:11px;display:flex;align-items:center;
+    justify-content:center;margin-bottom:12px}
+  .al-cell .n{font-family:'Nunito';font-size:22px;font-weight:900;letter-spacing:-.5px;
+    color:var(--al-ink);font-variant-numeric:tabular-nums;line-height:1}
+  .al-cell .t{font-size:11px;color:var(--al-ink-2);margin-top:5px;font-weight:600;line-height:1.3}
+  .al-cell .d{font-size:11px;font-weight:800;margin-top:6px;font-variant-numeric:tabular-nums}
+  @media (max-width:400px){.al-grid{grid-template-columns:repeat(2,1fr)}}
+
+  .al-block{background:var(--al-card);border-radius:22px;padding:18px;margin-bottom:14px;
+    box-shadow:0 6px 18px rgba(80,70,140,.06)}
+  .al-block h4{font-size:15px;font-weight:900;font-family:'Nunito';margin:0 0 14px;color:var(--al-ink)}
+
+  .al-user{display:flex;align-items:center;gap:12px;padding:11px 0}
+  .al-user + .al-user{border-top:1px solid var(--al-line)}
+  .al-ava{width:42px;height:42px;border-radius:14px;flex-shrink:0;overflow:hidden;position:relative;
+    display:flex;align-items:center;justify-content:center;font-family:'Nunito';font-weight:900;
+    font-size:16px;color:#fff}
+  .al-ava img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  .al-user-main{flex:1;min-width:0}
+  .al-user-name{font-size:14.5px;font-weight:800;color:var(--al-ink);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .al-user-sub{font-size:12px;color:var(--al-ink-2);margin-top:2px;font-variant-numeric:tabular-nums}
+  .al-user-side{text-align:right;flex-shrink:0}
+  .al-user-side .big{font-family:'Nunito';font-weight:900;font-size:16px;color:var(--al-ink);
+    font-variant-numeric:tabular-nums}
+  .al-user-side .lbl{font-size:10.5px;color:var(--al-ink-2);font-weight:600}
+  .al-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+  .al-bar-track{height:10px;border-radius:99px;background:var(--al-line);overflow:hidden}
+  .al-bar-fill{height:100%;border-radius:99px;transition:width .6s var(--spring)}
+  .al-note{font-size:12px;color:var(--al-ink-2);line-height:1.6;font-weight:500}
+
+  .admin-light .bar{background:linear-gradient(180deg,#9C8FF5,#C9C1FA)}
+  .admin-light .bar.peak{background:var(--al-violet);box-shadow:0 0 12px rgba(124,108,240,.4)}
+  .admin-light .bar.zero{background:var(--al-line)}
+  .admin-light .chart{background:var(--al-card);border:none;box-shadow:0 6px 18px rgba(80,70,140,.06)}
+  .admin-light .chart h4{color:var(--al-ink-2)}
+  .admin-light .chart-sum{color:var(--al-ink-2)}
+  .admin-light .xlab span{color:var(--al-ink-2)}
+  .admin-light .sec{color:var(--al-ink-2)}
 </style>
 </head>
 <body>

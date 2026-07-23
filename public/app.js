@@ -829,108 +829,133 @@ function Admin() {
   if (a.error) return errBox(a.error);
 
   const u = a.users || {}, m = a.messages || {}, st = a.settings || {};
-  const card = (grad, icon, label, value, sub) => `
-    <div class="stat" data-stagger>
-      <div class="head"><span class="chip" style="width:24px;height:24px;background:${grad}">${sv(icon,12,'#fff',2.4)}</span>${label}</div>
-      <div class="num">${value}</div>
-      ${sub ? `<div style="font-size:11.5px;color:var(--txt-lo);margin-top:6px;font-weight:600">${sub}</div>` : ''}
-    </div>`;
-
-  // Оценка заполнения бесплатного тарифа Postgres (обычно 256 МБ у Neon free,
-  // 512 МБ у Supabase). Порог берём консервативно — 256 МБ.
   const LIMIT = 256 * 1024 * 1024;
   const pct = Math.min(100, Math.round((a.storage.dbBytes / LIMIT) * 100));
-
   const growthVals = a.growth.map((g) => g.n);
   const volumeVals = a.volume.map((v) => v.n);
 
-  return `
-    <div class="sec">Пользователи</div>
-    <div class="grid2">
-      ${card('var(--g-purple)','user','Всего', fmt(u.total), `+${fmt(u.today)} за сутки`)}
-      ${card('var(--g-green)','bolt','Активны за неделю', fmt(a.activeWeek), 'приходили сообщения')}
-      ${card('var(--g-cyan)','clock','За 7 дней', fmt(u.week), 'новых')}
-      ${card('var(--g-orange)','clock','За 30 дней', fmt(u.month), 'новых')}
-    </div>
-
-    ${growthVals.length ? barChart(growthVals,
-      a.growth.map((g,i) => i % 5 === 0 ? new Date(g.day).getDate() : ''),
-      'Регистрации за 30 дней',
-      `Всего за период: ${fmt(growthVals.reduce((x,y)=>x+y,0))}`) : ''}
-
-    <div class="sec">Архив</div>
-    <div class="grid2">
-      ${card('var(--g-purple)','doc','Сообщений', fmt(m.total), `+${fmt(m.today)} за сутки`)}
-      ${card('var(--g-pink)','trash','Удалённых', fmt(m.deleted), 'спасено ботом')}
-      ${card('var(--g-cyan)','image','С медиа', fmt(m.media), '')}
-      ${card('var(--g-orange)','pencil','Изменённых', fmt(m.edited), '')}
-    </div>
-
-    ${volumeVals.length ? barChart(volumeVals,
-      a.volume.map((v,i) => i % 3 === 0 ? new Date(v.day).getDate() : ''),
-      'Поток сообщений за 14 дней',
-      `Пик: ${fmt(Math.max(...volumeVals))} в день`) : ''}
-
-    <div class="sec">Подключения</div>
-    <div class="card" style="margin:0 16px;overflow:hidden" data-stagger>
-      <div class="row">
-        <span class="chip" style="width:32px;height:32px;border-radius:11px;background:var(--g-cyan)">${sv('tg',15,'#fff',2.3)}</span>
-        <span class="row-main"><span class="row-title">Telegram Business</span>
-        <span class="row-sub">${fmt(a.connections.enabled)} активных из ${fmt(a.connections.total)}</span></span>
-      </div>
-      ${a.chats.map((c) => `<div class="div"></div>
-        <div class="row">
-          <span class="chip" style="width:32px;height:32px;border-radius:11px;background:var(--g-purple)">${sv('chat',15,'#fff',2.3)}</span>
-          <span class="row-main"><span class="row-title">${c.type === 'private' ? 'Личные чаты' : c.type === 'channel' ? 'Каналы' : 'Группы'}</span>
-          <span class="row-sub">подключено: ${fmt(c.n)}</span></span>
-        </div>`).join('')}
-    </div>
-
-    <div class="sec">Хранилище</div>
-    <div class="card" style="margin:0 16px;padding:18px" data-stagger>
-      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:12px">
-        <span style="font-size:15px;font-weight:800;font-family:'Nunito'">${fmtBytes(a.storage.dbBytes)}</span>
-        <span style="font-size:12px;color:${pct > 80 ? 'var(--red)' : 'var(--txt-lo)'};font-weight:700">${pct}% от 256 МБ</span>
-      </div>
-      <div style="height:10px;border-radius:99px;background:var(--glass-hi);overflow:hidden">
-        <div style="height:100%;width:${pct}%;border-radius:99px;
-          background:${pct > 80 ? 'var(--g-pink)' : pct > 50 ? 'var(--g-orange)' : 'var(--g-green)'};
-          transition:width .6s var(--spring)"></div>
-      </div>
-      <div class="note" style="margin-top:12px">
-        Таблица сообщений: ${fmtBytes(a.storage.messagesBytes)}, из них текст — ${fmtBytes(a.storage.textBytes)}.
-        Порог 256 МБ взят по нижней границе бесплатных тарифов Postgres —
-        сверьтесь со своим провайдером.
-      </div>
-    </div>
-
-    <div class="sec">Использование настроек</div>
-    <div class="card" style="margin:0 16px;padding:18px" data-stagger>
-      <div class="note" style="line-height:2">
-        Уведомления об удалении: <b style="color:var(--txt)">${fmt(st.notify_deleted)}</b><br>
-        Об изменении: <b style="color:var(--txt)">${fmt(st.notify_edited)}</b><br>
-        Фейк-контроль: <b style="color:var(--txt)">${fmt(st.notify_fake)}</b><br>
-        Тихие часы: <b style="color:var(--txt)">${fmt(st.quiet_hours)}</b>
-      </div>
-    </div>
-
-    ${m.quarantined ? `
-      <div class="card" style="margin:12px 16px 0;padding:17px;border-color:rgba(251,146,60,.4)" data-stagger>
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:9px">
-          ${sv('alert',16,'var(--orange)')}
-          <span style="font-size:14px;font-weight:800;font-family:'Nunito';color:var(--orange-2)">Спорные копии: ${fmt(m.quarantined)}</span>
-        </div>
-        <div class="note">
-          Сообщения из чатов, подключённых несколькими пользователями до
-          разделения архивов. Владельца установить нельзя, поэтому они скрыты
-          у всех. Данные не удалены.
-        </div>
-      </div>` : ''}
-
-    <div class="note" style="margin:18px 16px 0;text-align:center">
-      Обновлено ${new Date(a.generatedAt).toLocaleString('ru-RU')}<br>
-      Содержимое переписки пользователей здесь не отображается.
+  // Метрика-ячейка светлого концепта
+  const cell = (icon, tint, n, label, delta, deltaColor) => `
+    <div class="al-cell" data-stagger>
+      <div class="ic" style="background:${tint}22">${sv(icon,17,tint,2.3)}</div>
+      <div class="n">${n}</div>
+      <div class="t">${label}</div>
+      ${delta ? `<div class="d" style="color:${deltaColor}">${delta}</div>` : ''}
     </div>`;
+
+  const V = '#7C6CF0', GR = '#22C55E', OR = '#FB923C', RD = '#EF4444', CY = '#3BA6F0';
+
+  // Список пользователей: аватар (фото или цветная буква), имя, метаданные,
+  // объём. Названий чатов и текстов здесь нет — только агрегаты.
+  const userRow = (p) => {
+    const letter = esc((p.name || p.username || '?')[0]).toUpperCase();
+    const src = authUrl('/api/avatar', { peer: p.id });
+    const online = p.lastActive && (Date.now() - new Date(p.lastActive)) < 7 * 864e5;
+    const name = p.name || (p.username ? '@' + p.username : 'ID ' + p.id);
+    return `<div class="al-user">
+      <span class="al-ava" style="background:${tintFor(p.id)}">
+        <img src="${src}" alt="" loading="lazy" onerror="this.remove()">${letter}</span>
+      <span class="al-user-main">
+        <span class="al-user-name">${esc(name)}${p.premium ? ' <span style="color:#F59E0B">★</span>' : ''}</span>
+        <span class="al-user-sub">
+          ${p.username && p.name ? '@' + esc(p.username) + ' · ' : ''}${fmt(p.chats)} чат.
+          · с ${new Date(p.since).toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',year:'2-digit'})}
+        </span>
+      </span>
+      <span class="al-user-side">
+        <span class="big">${fmt(p.messages)}</span>
+        <span class="lbl" style="display:flex;align-items:center;gap:5px;justify-content:flex-end;margin-top:2px">
+          <span class="al-dot" style="background:${online ? GR : '#C9C6D8'}"></span>${online ? 'активен' : 'тихо'}
+        </span>
+      </span>
+    </div>`;
+  };
+
+  const list = a.list || [];
+
+  return `<div class="admin-light">
+    <div class="al-hi">Панель владельца</div>
+    <div class="al-sub">Обзор продукта · ${new Date(a.generatedAt).toLocaleDateString('ru-RU')}</div>
+
+    <div class="al-hero" style="margin-top:16px" data-stagger>
+      <div class="al-hero-l">
+        <div class="lbl">Сегодня спасено</div>
+        <div class="big" data-count="${m.deleted||0}">0</div>
+        <div class="cap">удалённых сообщений всего</div>
+        <div class="al-delta">${sv('trash',13,V,2.4)} +${fmt(u.today)} новых за сутки</div>
+      </div>
+      <div class="al-shield">${sv('shield',44,V,2)}</div>
+    </div>
+
+    <div class="al-grid">
+      ${cell('doc', V,  fmt(m.total),   'Всего сообщений', `+${fmt(m.today)} за сутки`, V)}
+      ${cell('image',CY,fmt(m.media),   'Медиа файлов',    '', CY)}
+      ${cell('pencil',OR,fmt(m.edited), 'Изменений',       '', OR)}
+      ${cell('trash',RD,fmt(m.deleted), 'Удалённых',       `+${fmt(u.today)} за сутки`, RD)}
+    </div>
+
+    ${volumeVals.length ? `<div style="margin:0 0 14px">${barChart(volumeVals,
+      a.volume.map((v,i) => i % 3 === 0 ? new Date(v.day).getDate() : ''),
+      'Динамика сообщений',
+      `Пик активности: ${fmt(Math.max(...volumeVals))} в день`)}</div>` : ''}
+
+    <div class="al-grid">
+      ${cell('user', V,  fmt(u.total),      'Пользователей',   `+${fmt(u.today)} за сутки`, V)}
+      ${cell('bolt', GR, fmt(a.activeWeek), 'Активных за неделю','', GR)}
+      ${cell('clock',CY, fmt(u.week),       'За 7 дней новых', `+${fmt(u.today)} за сутки`, CY)}
+      ${cell('clock',OR, fmt(u.month),      'За 30 дней новых','', OR)}
+    </div>
+
+    <div class="al-block" data-stagger>
+      <h4>Хранилище</h4>
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px">
+        <span style="font-family:'Nunito';font-weight:900;font-size:18px">${fmtBytes(a.storage.dbBytes)}</span>
+        <span style="font-size:12px;font-weight:800;color:${pct>80?RD:'#6B6880'}">${pct}% от 256 МБ</span>
+      </div>
+      <div class="al-bar-track"><div class="al-bar-fill" style="width:${pct}%;
+        background:${pct>80?RD:pct>50?OR:GR}"></div></div>
+      <div class="al-note" style="margin-top:12px">
+        Сообщения: ${fmtBytes(a.storage.messagesBytes)}, из них текст ${fmtBytes(a.storage.textBytes)}.
+        Порог взят по нижней границе бесплатных тарифов Postgres.
+      </div>
+    </div>
+
+    <div class="al-block" data-stagger>
+      <h4>Пользователи · ${fmt(list.length)}${list.length===200?'+':''}</h4>
+      ${list.length ? list.map(userRow).join('') : '<div class="al-note">Пока никого.</div>'}
+      ${list.length===200 ? '<div class="al-note" style="margin-top:12px">Показаны последние 200.</div>' : ''}
+    </div>
+
+    <div class="al-block" data-stagger>
+      <h4>Подключения</h4>
+      <div class="al-user" style="border:none;padding-top:0">
+        <span class="al-ava" style="background:${CY}">${sv('tg',18,'#fff',2.3)}</span>
+        <span class="al-user-main">
+          <span class="al-user-name">Telegram Business</span>
+          <span class="al-user-sub">${fmt(a.connections.enabled)} активных из ${fmt(a.connections.total)}</span>
+        </span>
+      </div>
+      ${a.chats.map((c) => `<div class="al-user">
+        <span class="al-ava" style="background:${V}">${sv('chat',18,'#fff',2.3)}</span>
+        <span class="al-user-main">
+          <span class="al-user-name">${c.type==='private'?'Личные чаты':c.type==='channel'?'Каналы':'Группы'}</span>
+          <span class="al-user-sub">подключено: ${fmt(c.n)}</span>
+        </span>
+      </div>`).join('')}
+    </div>
+
+    ${m.quarantined ? `<div class="al-block" style="border:1px solid rgba(251,146,60,.35)" data-stagger>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        ${sv('alert',16,OR,2.3)}<span style="font-weight:900;font-family:'Nunito';color:${OR}">Спорные копии: ${fmt(m.quarantined)}</span>
+      </div>
+      <div class="al-note">Сообщения из чатов, подключённых несколькими пользователями до разделения архивов. Скрыты у всех, не удалены.</div>
+    </div>` : ''}
+
+    <div class="al-note" style="text-align:center;padding:8px 0 4px">
+      Обновлено ${new Date(a.generatedAt).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}<br>
+      Содержимое переписки пользователей здесь не отображается.
+    </div>
+  </div>`;
 }
 
 /* ── Конфиденциальность ── */

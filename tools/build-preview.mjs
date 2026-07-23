@@ -181,6 +181,13 @@ const MOCK = {
       connections:{ total:840, enabled:812 },
       storage:{ dbBytes:198*1024*1024, messagesBytes:150*1024*1024, textBytes:40*1024*1024 },
       settings:{ notify_deleted:1100, notify_edited:210, notify_fake:980, quiet_hours:430 },
+      list:[
+        { id:'901', name:'Георгий', username:'georgy', premium:true,  since:'2026-03-11T00:00:00Z', chats:4, messages:2066, lastActive:new Date().toISOString(), business:true },
+        { id:'902', name:'Сания',   username:'saniya', premium:false, since:'2026-04-02T00:00:00Z', chats:2, messages:512,  lastActive:new Date().toISOString(), business:true },
+        { id:'903', name:'Артём',   username:null,     premium:false, since:'2026-04-18T00:00:00Z', chats:3, messages:889,  lastActive:'2026-05-20T00:00:00Z', business:true },
+        { id:'904', name:'ageeva_a',username:'ageeva', premium:false, since:'2026-05-30T00:00:00Z', chats:1, messages:87,   lastActive:new Date().toISOString(), business:false },
+        { id:'905', name:null,      username:'lc_dev', premium:true,  since:'2026-06-12T00:00:00Z', chats:2, messages:143,  lastActive:'2026-06-15T00:00:00Z', business:true },
+      ],
       generatedAt:new Date().toISOString(),
     };
 

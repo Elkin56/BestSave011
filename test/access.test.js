@@ -295,7 +295,14 @@ describe('аватар собеседника', () => {
     // получить фото произвольного пользователя Telegram.
     assert.match(src, /import \{[^}]*VISIBLE[^}]*\} from '\.\.\/db\.js'/);
     assert.match(src, /m\.sender_tg_id = \$2 AND \$\{VISIBLE\}/);
-    assert.match(src, /peer not in your archive/);
+    assert.match(src, /peer not accessible/);
+  });
+
+  test('владелец видит аватары всех пользователей, но не посторонних людей', () => {
+    // Ветка владельца ограничена зарегистрированными пользователями продукта:
+    // фото случайного человека, не открывавшего приложение, не вытащить
+    assert.match(src, /parseAdminIds\(process\.env\.ADMIN_TG_IDS\)/);
+    assert.match(src, /SELECT 1 FROM app_user WHERE tg_id = \$1/);
   });
 
   test('нечисловой peer отклоняется до похода в Telegram', () => {
@@ -461,6 +468,26 @@ describe('панель владельца', () => {
   test('текст читается только как размер, не как содержимое', () => {
     // pg_column_size(text) даёт объём в байтах — сам текст не покидает БД
     assert.match(src, /pg_column_size\(text\)/);
+  });
+
+  test('список пользователей не содержит их переписки', () => {
+    // Разрешены метаданные и агрегаты. Названия чатов и текст — под запретом:
+    // название личного чата выдаёт собеседника.
+    // Берём весь запрос списка от SELECT до его LIMIT.
+    const start = src.indexOf('SELECT u.tg_id, u.first_name');
+    assert.ok(start >= 0, 'запрос списка не найден');
+    const listQuery = src.slice(start, src.indexOf('LIMIT 200', start));
+    assert.doesNotMatch(listQuery, /\bc\.title\b/, 'названия чатов в списке запрещены');
+    assert.doesNotMatch(listQuery, /\bJOIN chat\b/, 'подключение таблицы chat к списку запрещено');
+    assert.doesNotMatch(listQuery, /\bm\.text\b/);
+    assert.doesNotMatch(listQuery, /media_file_id/);
+    assert.doesNotMatch(listQuery, /string_agg/, 'склейка строк может протащить содержимое');
+    // Только счётчики и метаданные пользователя
+    assert.match(listQuery, /COUNT\(m\.id\)::int AS messages/);
+  });
+
+  test('список ограничен, а не выгружает всю базу', () => {
+    assert.match(src, /LIMIT 200/);
   });
 
   test('флаг isAdmin на клиенте не даёт прав', () => {
