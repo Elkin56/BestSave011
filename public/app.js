@@ -16,20 +16,9 @@ async function api(path) {
   });
   if (!r.ok) {
     const b = await r.json().catch(() => ({}));
-    if (gateRejected(b, r.status)) return {};
     throw new Error(b.reason || b.error || `HTTP ${r.status}`);
   }
   return r.json();
-}
-
-// Сервер закрыл доступ до выполнения условий. Он присылает состояние гейта
-// прямо в ответе — берём его и показываем экран условий вместо голой ошибки.
-function gateRejected(body, status) {
-  if (status !== 403 || body?.error !== 'gate_required') return false;
-  S.gate = body.gate || { passed: false };
-  S.loading = false;
-  render();
-  return true;
 }
 
 const S = {
@@ -51,9 +40,6 @@ const S = {
   settings: null,         // { notifyDeleted, notifyEdited, notifyFake }
   admin: null,            // метрики владельца (только если isAdmin)
   isAdmin: false,
-  gate: null,             // условия доступа: null пока не проверены
-  gateBusy: false,        // идёт проверка по кнопке
-  gateCopied: false,      // ссылку только что скопировали
   aiTab: 0,
 };
 
@@ -73,7 +59,6 @@ async function apiPost(path, body) {
   });
   if (!r.ok) {
     const b = await r.json().catch(() => ({}));
-    if (gateRejected(b, r.status)) return {};
     throw new Error(b.reason || b.error || `HTTP ${r.status}`);
   }
   return r.json();
@@ -147,40 +132,10 @@ function runEntrance(root) {
   applyStagger(root);
 }
 
-// Копирование ссылки. В Telegram WebView clipboard-API доступен не всегда,
-// поэтому есть запасной путь через скрытое поле.
-async function copyInvite(link) {
-  if (!link) return;
-  let ok = false;
-  try {
-    await navigator.clipboard.writeText(link);
-    ok = true;
-  } catch {
-    try {
-      const ta = document.createElement('textarea');
-      ta.value = link;
-      ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
-      document.body.appendChild(ta);
-      ta.select();
-      ok = document.execCommand('copy');
-      ta.remove();
-    } catch { ok = false; }
-  }
-  if (!ok) return;
-  S.gateCopied = true; render();
-  if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-  setTimeout(() => { S.gateCopied = false; render(); }, 2000);
-}
-
 /* ── загрузка ── */
 async function loadAll() {
   S.loading = true; S.error = null; render();
   try {
-    // Условия доступа — первым делом: пока они не выполнены, остальные
-    // эндпоинты всё равно ответят 403, и грузить их незачем.
-    S.gate = await api('/api/gate');
-    if (!S.gate.passed) { S.loading = false; render(); return; }
-
     const [stats, chats, me] = await Promise.all([
       api('/api/stats'), api('/api/chats'), api('/api/me'),
     ]);
@@ -192,21 +147,6 @@ async function loadAll() {
     S.isAdmin = Boolean(me.isAdmin);
   } catch (e) { S.error = e.message; }
   finally { S.loading = false; render(); }
-}
-
-// Перепроверка по кнопке «Я всё сделал».
-async function recheckGate() {
-  if (S.gateBusy) return;
-  S.gateBusy = true; render();
-  try {
-    S.gate = await apiPost('/api/gate', {});
-    if (tg?.HapticFeedback) {
-      tg.HapticFeedback.notificationOccurred(S.gate.passed ? 'success' : 'warning');
-    }
-    // Условия выполнены — сразу подтягиваем настоящие данные.
-    if (S.gate.passed) { S.gateBusy = false; return loadAll(); }
-  } catch (e) { S.error = e.message; }
-  finally { S.gateBusy = false; render(); }
 }
 
 async function loadEvents() {
@@ -773,14 +713,11 @@ function Profile() {
         <span class="tg-badge" title="Из Telegram">${sv('tg',12,'#fff',2.2)}</span>
       </div>
       <div style="flex:1;min-width:0">
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <span style="font-size:19px;font-weight:800;letter-spacing:-.4px">${esc(name)}</span>
-          ${S.isAdmin?`<span class="tag owner">Владелец</span>`:''}
-        </div>
+        <div style="font-size:19px;font-weight:800;letter-spacing:-.4px">${esc(name)}</div>
         ${u.username?`<div style="font-size:12.5px;color:var(--txt-lo);margin-top:1px">@${esc(u.username)}</div>`:''}
+        ${u.isPremium?`<span class="tag gold" style="margin-top:6px;display:inline-block">Telegram Premium</span>`:''}
       </div>
     </div>
-    ${u.isPremium?`<div style="margin:-8px 16px 12px;font-size:13px;font-weight:800;color:var(--blue);letter-spacing:-.1px">Telegram Premium</div>`:''}
     <div class="note" style="margin:0 16px">Имя и аватар берутся из Telegram — отдельно загружать не нужно.</div>
 
     <div class="sec">Ваш архив</div>
@@ -1179,105 +1116,6 @@ function quietTzLabel() {
   return ` (UTC${sign}${h}${m ? ':' + String(m).padStart(2,'0') : ''})`;
 }
 
-/* ── Условия доступа ──
-   Показывается вместо всего приложения, пока оба шага не выполнены.
-   Тон намеренно объясняющий, а не требовательный: человек должен понимать,
-   зачем его просят, иначе экран читается как вымогательство. */
-function Gate() {
-  const g = S.gate || {};
-  const ch = g.channel || {};
-  const inv = g.invites || { count: 0, need: 3, left: 3 };
-  const done = inv.count >= inv.need;
-  const pct = Math.min(100, Math.round((inv.count / Math.max(1, inv.need)) * 100));
-
-  const step = (n, ok, title, sub, body) => `
-    <div class="card" style="margin:0 16px 12px;padding:18px;
-      border-color:${ok ? 'var(--green-line)' : 'var(--line)'}">
-      <div style="display:flex;align-items:flex-start;gap:13px">
-        <span class="step-num" style="background:${ok ? 'var(--g-green)' : 'var(--g-purple)'};
-          box-shadow:none">${ok ? sv('check', 14, '#04231A', 3) : n}</span>
-        <span style="flex:1;min-width:0">
-          <span style="display:block;font-size:14.5px;font-weight:800">${title}</span>
-          <span style="display:block;font-size:12px;color:var(--txt-lo);margin-top:3px;line-height:1.45">${sub}</span>
-        </span>
-      </div>
-      ${body ? `<div style="margin-top:14px">${body}</div>` : ''}
-    </div>`;
-
-  const chBody = ch.subscribed
-    ? `<div class="note" style="margin:0;color:var(--green)">Подписка подтверждена</div>`
-    : `<a class="btn-green" href="${esc(ch.url || 'https://t.me/bestsavee')}" data-tglink>
-         ${sv('tg', 17, '#04231A', 2.4)} Подписаться
-       </a>
-       ${ch.subscribed === null ? `<div class="note" style="margin-top:10px;color:var(--gold)">
-         Проверить подписку сейчас не получилось. Подпишитесь и нажмите «Проверить» ещё раз.</div>` : ''}`;
-
-  const invBody = `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-      <div style="flex:1;height:8px;border-radius:99px;background:var(--surf-hi);overflow:hidden">
-        <div style="height:100%;width:${pct}%;border-radius:99px;
-          background:${done ? 'var(--g-green)' : 'var(--g-hero)'};transition:width .5s var(--spring-soft)"></div>
-      </div>
-      <span style="font-size:13px;font-weight:900;font-variant-numeric:tabular-nums;
-        color:${done ? 'var(--green)' : 'var(--txt)'}">${inv.count}/${inv.need}</span>
-    </div>
-    ${done ? '' : `
-    <a class="btn-green" href="${esc(inv.shareUrl || '#')}" data-tglink>
-      ${sv('tg', 17, '#04231A', 2.4)} Позвать друзей
-    </a>
-    <button class="btn-ghost" style="width:100%;margin-top:9px" data-gate-copy="${esc(inv.link || '')}">
-      ${sv(S.gateCopied ? 'check' : 'doc', 15, 'var(--txt-lo)', 2.2)}
-      ${S.gateCopied ? 'Ссылка скопирована' : 'Скопировать ссылку'}
-    </button>
-    <div class="note" style="margin-top:10px">
-      Telegram сам предложит выбрать чат — текст со ссылкой уже готов.
-      Друг засчитывается, когда откроет бота впервые.
-    </div>`}`;
-
-  return `
-    <div style="padding:26px 16px 6px;text-align:center">
-      <div style="width:64px;height:64px;margin:0 auto 14px;border-radius:22px;background:var(--g-hero);
-        display:flex;align-items:center;justify-content:center;box-shadow:0 12px 30px rgba(236,72,153,.35)">
-        ${sv('lock', 28, '#fff', 2.2)}
-      </div>
-      <div style="font-size:21px;font-weight:900;letter-spacing:-.5px">Ещё два шага</div>
-      <div style="font-size:13px;color:var(--txt-lo);margin-top:7px;line-height:1.5">
-        BestSave бесплатный и держится на тех, кто о нём рассказал.<br>
-        Выполните два условия — и архив откроется навсегда.
-      </div>
-    </div>
-
-    <div class="sec">Условия</div>
-    ${step(1, ch.subscribed === true, `Подписаться на ${esc(ch.title || 'BestSave Community')}`,
-      'Обновления, новые функции и планы — без этого канала вы просто не узнаете, что появилось.',
-      chBody)}
-    ${step(2, done, `Пригласить ${inv.need} ${friendsWord(inv.need)}`,
-      done ? 'Условие выполнено — спасибо!'
-           : `Осталось ${inv.left} ${friendsWord(inv.left)}. Ссылка личная: переходы по ней засчитываются вам.`,
-      invBody)}
-
-    <div style="padding:4px 16px 0">
-      <button class="btn-green" data-gate-check ${S.gateBusy ? 'disabled' : ''}
-        style="${S.gateBusy ? 'opacity:.6' : ''}">
-        ${sv('refresh', 17, '#04231A', 2.4)} ${S.gateBusy ? 'Проверяю…' : 'Проверить'}
-      </button>
-      ${S.error ? `<div class="note" style="margin-top:10px;color:var(--red)">${esc(S.error)}</div>` : ''}
-    </div>
-
-    <div class="note" style="margin:16px 16px 0">
-      Архив всё это время не простаивает: чаты, куда бот уже добавлен, продолжают
-      сохраняться. Условия закрывают только просмотр — данные никуда не денутся.
-    </div>`;
-}
-
-// Склонение «друга/друзей» — то же правило, что на сервере в lib/gate.js
-function friendsWord(n) {
-  const a = Math.abs(n) % 100, b = a % 10;
-  if (a > 10 && a < 20) return 'друзей';
-  if (b >= 1 && b <= 4) return 'друга';
-  return 'друзей';
-}
-
 // Ссылки на сообщество — одинаковые на нескольких экранах.
 function communityCard() {
   return `
@@ -1337,20 +1175,10 @@ function nav() {
 /* ── рендер ── */
 let prevScreen = null;
 function render() {
-  const locked = Boolean(S.gate) && !S.gate.passed;
-
-  $('top').innerHTML = locked
-    ? `<div class="logo"><img src="/cat.jpg" alt="" width="38" height="38"></div>
-       <div style="flex:1"><div class="brand">BestSave</div></div>`
-    : topBar();
-  // Пока условия не выполнены, нижняя навигация не рисуется: вкладки,
-  // которые всё равно ответят отказом, только раздражают.
-  $('nav').innerHTML = locked ? '' : nav();
-  $('nav').style.display = locked ? 'none' : '';
-
+  $('top').innerHTML = topBar();
+  $('nav').innerHTML = nav();
   const main = $('main');
   if (S.loading) { main.innerHTML = spinner(); return; }
-  if (locked) { main.innerHTML = Gate(); return; }
   if (S.error && !S.stats) { main.innerHTML = errBox(S.error); return; }
   const screens = { home:Home, chats:Chats, chatview:ChatView, events:Events, ai:AI,
     profile:Profile, settings:Settings, notifications:Notifications, privacy:Privacy,
@@ -1364,12 +1192,9 @@ function render() {
 
 /* ── события ── */
 document.addEventListener('click', (e) => {
-  const el = e.target.closest('[data-tab],[data-open],[data-ctab],[data-reload],[data-addbot],[data-export],[data-toggle],[data-clear-search],[data-erase],[data-tglink],[data-pin],[data-clear-msgsearch],[data-gate-check],[data-gate-copy]');
+  const el = e.target.closest('[data-tab],[data-open],[data-ctab],[data-reload],[data-addbot],[data-export],[data-toggle],[data-clear-search],[data-erase],[data-tglink],[data-pin],[data-clear-msgsearch]');
   if (!el) return;
   if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
-
-  if (el.dataset.gateCheck !== undefined) { e.preventDefault(); recheckGate(); return; }
-  if (el.dataset.gateCopy) { e.preventDefault(); copyInvite(el.dataset.gateCopy); return; }
 
   if (el.dataset.addbot !== undefined && tg?.openTelegramLink) {
     e.preventDefault(); tg.openTelegramLink(el.getAttribute('href')); return;
