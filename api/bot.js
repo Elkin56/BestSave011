@@ -20,8 +20,15 @@ import {
   getBusinessConnection, linkBusinessChat, getUserSettings, updateBotAdminFlag,
   // isQuietNow импортируется отдельно: чистая функция без БД
   firstSeenMedia,
+  // условия доступа
+  userExists, addReferral, countReferrals, getGatePassedAt, markGatePassed,
 } from '../lib/db.js';
 import { isQuietNow } from '../lib/quiet.js';
+import {
+  parseRefPayload, inviteLink, shareUrl, communityUrl, pluralFriends,
+  REQUIRED_INVITES, COMMUNITY_TITLE, SHARE_TEXT,
+} from '../lib/gate.js';
+import { checkSubscription } from '../lib/handlers/gate.js';
 
 const API = (token, method) => `https://api.telegram.org/bot${token}/${method}`;
 
@@ -148,6 +155,9 @@ async function route(update) {
   // ── бота добавили/сняли/сменили права ──
   if (update.my_chat_member) return onMyChatMember(update.my_chat_member);
 
+  // ── нажатия на inline-кнопки (проверка условий доступа) ──
+  if (update.callback_query) return onCallback(update.callback_query);
+
   const msg = update.message || update.channel_post;
   const edited = update.edited_message || update.edited_channel_post;
 
@@ -183,16 +193,176 @@ async function getMe() {
   return meCache;
 }
 
+// ─── условия доступа ───
+//
+// Пока человек не подписан на канал и не привёл REQUIRED_INVITES друзей,
+// бот показывает экран условий вместо работы. Архивацию это не ломает:
+// чаты, куда бот уже добавлен, продолжают сохраняться — гейт закрывает
+// доступ к архиву, а не выбрасывает данные.
+
+// Текущее состояние условий для пользователя.
+async function gateFor(tgId) {
+  const passedAt = await db(() => getGatePassedAt(tgId));
+  if (passedAt) return { passed: true, subscribed: true, invites: REQUIRED_INVITES };
+
+  const [subscribed, invites] = await Promise.all([
+    checkSubscription(tgId),
+    db(() => countReferrals(tgId)),
+  ]);
+  const n = invites || 0;
+  const passed = subscribed === true && n >= REQUIRED_INVITES;
+  if (passed) await db(() => markGatePassed(tgId));
+  return { passed, subscribed, invites: n };
+}
+
+function gateKeyboard(botUsername, tgId) {
+  return {
+    inline_keyboard: [
+      [{ text: `📣 Подписаться на ${COMMUNITY_TITLE}`, url: communityUrl() }],
+      [{ text: '🤝 Позвать друзей', url: shareUrl(botUsername, tgId) }],
+      [{ text: '✅ Я всё сделал — проверить', callback_data: 'gate:check' }],
+    ],
+  };
+}
+
+function gateText(state) {
+  const left = Math.max(0, REQUIRED_INVITES - state.invites);
+  const sub = state.subscribed === true ? '✅'
+    : state.subscribed === null ? '❔' : '⬜️';
+  const inv = state.invites >= REQUIRED_INVITES ? '✅' : '⬜️';
+
+  return '🔓 Осталось два шага до доступа\n\n' +
+    `${sub} 1. Подписаться на канал ${COMMUNITY_TITLE}\n` +
+    (state.subscribed === null
+      ? '     (проверить подписку не удалось — попробуйте ещё раз через минуту)\n'
+      : '') +
+    `${inv} 2. Пригласить друзей: ${state.invites} из ${REQUIRED_INVITES}\n` +
+    (left > 0 ? `     осталось ${left} ${pluralFriends(left)}\n` : '') +
+    '\nПочему так: BestSave бесплатный и живёт за счёт тех, кто про него ' +
+    'рассказал. Канал — чтобы вы узнали об обновлениях, приглашения — чтобы ' +
+    'проект рос.\n\n' +
+    'Нажмите «Позвать друзей» — Telegram сам предложит выбрать чат, текст со ' +
+    'ссылкой уже готов.';
+}
+
+// Отправить экран условий. Возвращает true, если доступ уже открыт.
+async function sendGateIfNeeded(chatId, tgId) {
+  const state = await gateFor(tgId);
+  if (state.passed) return true;
+
+  const me = await getMe();
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text: gateText(state),
+    reply_markup: gateKeyboard(me?.username, tgId),
+    disable_web_page_preview: true,
+  });
+  return false;
+}
+
+// Нажатие на inline-кнопку. Пока обрабатываем только проверку условий.
+async function onCallback(cq) {
+  const data = cq.data || '';
+  const tgId = cq.from?.id;
+  const chatId = cq.message?.chat?.id;
+  if (!tgId) return;
+
+  if (data !== 'gate:check') {
+    await tg('answerCallbackQuery', { callback_query_id: cq.id });
+    return;
+  }
+
+  const state = await gateFor(tgId);
+
+  // Короткий ответ во всплывашке — чтобы человек сразу понял результат,
+  // не вчитываясь в перерисованное сообщение.
+  await tg('answerCallbackQuery', {
+    callback_query_id: cq.id,
+    text: state.passed
+      ? '✅ Готово! Доступ открыт'
+      : state.subscribed !== true
+        ? 'Подписка на канал пока не видна'
+        : `Ещё ${REQUIRED_INVITES - state.invites} ${pluralFriends(REQUIRED_INVITES - state.invites)}`,
+    show_alert: !state.passed,
+  });
+
+  if (!chatId) return;
+
+  if (state.passed) {
+    await tg('editMessageText', {
+      chat_id: chatId,
+      message_id: cq.message.message_id,
+      text: '✅ Условия выполнены — доступ открыт!\n\n' +
+        'Спасибо, что позвали друзей. Открывайте архив кнопкой меню слева ' +
+        'или командой /start.',
+    });
+    return;
+  }
+
+  // Перерисовываем экран с актуальными галочками. Если текст не изменился,
+  // Telegram отвечает ошибкой «message is not modified» — это нормально
+  // и намеренно игнорируется.
+  const me = await getMe();
+  await tg('editMessageText', {
+    chat_id: chatId,
+    message_id: cq.message.message_id,
+    text: gateText(state),
+    reply_markup: gateKeyboard(me?.username, tgId),
+    disable_web_page_preview: true,
+  });
+}
+
+// Засчитать приглашение по deep-link /start ref<id>.
+// Считается только НОВЫЙ человек: иначе давний пользователь открывал бы
+// чужие ссылки и раздавал приглашения из воздуха.
+async function creditReferral(payload, from) {
+  const inviter = parseRefPayload(payload);
+  if (!inviter || !from?.id || inviter === from.id) return;
+
+  const existed = await db(() => userExists(from.id));
+  // existed === null означает, что база не ответила: в этом случае лучше
+  // не засчитать честного друга, чем засчитать несуществующего.
+  if (existed !== false) return;
+
+  const added = await db(() => addReferral(inviter, from.id));
+  if (!added) return;
+
+  const total = await db(() => countReferrals(inviter));
+  const left = Math.max(0, REQUIRED_INVITES - (total || 0));
+  const who = from.first_name ? `${from.first_name} ` : '';
+
+  await tg('sendMessage', {
+    chat_id: inviter,
+    text: left > 0
+      ? `🤝 ${who}перешёл по вашей ссылке — засчитано ${total} из ${REQUIRED_INVITES}.\n\n` +
+        `Осталось ${left} ${pluralFriends(left)}.`
+      : `🎉 ${who}перешёл по вашей ссылке — это ${total}-й друг!\n\n` +
+        'Условие по приглашениям выполнено. Нажмите /start, чтобы проверить доступ.',
+  });
+}
+
 // ─── команды ───
 async function onCommand(msg) {
   const isPrivate = msg.chat.type === 'private';
   // В группе команда приходит как "/start@bestsaves_bot" — отрезаем имя бота.
   const cmd = msg.text.split(/[\s@]/)[0].toLowerCase();
+  // Полезная нагрузка deep-link: "/start ref123456".
+  const payload = msg.text.split(/\s+/)[1] || '';
+
+  // Порядок важен: реферал считается до upsertUser, потому что признак
+  // «новый человек» существует ровно до момента, когда мы его записали.
+  if (cmd === '/start' && isPrivate && payload) {
+    await creditReferral(payload, msg.from);
+  }
 
   if (msg.from) await db(() => upsertUser(msg.from));
 
   if (cmd === '/start') {
     if (isPrivate) {
+      // Условия доступа проверяем до приветствия: показывать инструкцию по
+      // подключению тому, кто ещё не может открыть архив, — только путать.
+      if (!(await sendGateIfNeeded(msg.chat.id, msg.from?.id))) return;
+
       const me = await getMe();
       const uname = me?.username ? '@' + me.username : 'этого бота';
       await tg('sendMessage', {
@@ -242,7 +412,33 @@ async function onCommand(msg) {
         '• то же самое, плюс ловлю удаление в момент удаления\n' +
         '• подключение: Настройки → Telegram Business → Чат-боты\n' +
         '• нужен Telegram Premium\n\n' +
-        'Чужие переписки, где вас нет, я не вижу — и не пытаюсь.',
+        'Чужие переписки, где вас нет, я не вижу — и не пытаюсь.\n\n' +
+        '🤝 /invite — ваша ссылка для друзей и статус условий доступа.',
+    });
+    return;
+  }
+
+  if (cmd === '/invite') {
+    if (!isPrivate) return;
+    const tgId = msg.from?.id;
+    const me = await getMe();
+    const state = await gateFor(tgId);
+    const left = Math.max(0, REQUIRED_INVITES - state.invites);
+
+    await tg('sendMessage', {
+      chat_id: msg.chat.id,
+      text:
+        `🤝 Приглашено друзей: ${state.invites} из ${REQUIRED_INVITES}` +
+        (left > 0 ? ` — осталось ${left} ${pluralFriends(left)}` : ' — условие выполнено ✅') +
+        '\n\nВаша личная ссылка:\n' + inviteLink(me?.username, tgId) +
+        '\n\nНажмите кнопку ниже — Telegram сам предложит выбрать чат, ' +
+        'текст со ссылкой уже готов.',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '📤 Поделиться с друзьями', url: shareUrl(me?.username, tgId) }],
+        ],
+      },
+      disable_web_page_preview: true,
     });
     return;
   }
@@ -263,7 +459,7 @@ async function onCommand(msg) {
   if (isPrivate) {
     await tg('sendMessage', {
       chat_id: msg.chat.id,
-      text: 'Команды: /start — начать, /help — как это работает, /status — проверка связи.',
+      text: 'Команды: /start — начать, /invite — позвать друзей, /help — как это работает, /status — проверка связи.',
     });
   }
 }

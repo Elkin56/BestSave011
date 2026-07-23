@@ -149,6 +149,8 @@ const MOCK = {
       windowDays:30,
     };
 
+    if (route === 'gate') return PREVIEW_GATE();
+
     if (route === 'events') return { cards: PREVIEW_EVENT_CARDS, totalMessages: 1469 };
 
     if (route === 'me') return {
@@ -225,6 +227,29 @@ const MOCK = {
   },
 };
 
+// Состояние гейта в превью переключается кнопками внизу: 0 — ничего не
+// выполнено, 1 — подписка есть и один друг, 2 — доступ открыт.
+window.PREVIEW_GATE_STEP = 2;
+function PREVIEW_GATE() {
+  const step = window.PREVIEW_GATE_STEP;
+  const link = 'https://t.me/bestsaves_bot?start=ref901';
+  return {
+    passed: step === 2,
+    channel: {
+      title: 'BestSave Community',
+      url: 'https://t.me/bestsavee',
+      subscribed: step >= 1,
+    },
+    invites: {
+      count: step === 0 ? 0 : step === 1 ? 1 : 3,
+      need: 3,
+      left: step === 0 ? 3 : step === 1 ? 2 : 0,
+      link,
+      shareUrl: 'https://t.me/share/url?url=' + encodeURIComponent(link),
+    },
+  };
+}
+
 // Панель переключения экранов — только в превью, в приложении её нет.
 document.addEventListener('DOMContentLoaded', () => {
   const bar = document.createElement('div');
@@ -233,6 +258,7 @@ document.addEventListener('DOMContentLoaded', () => {
     ['home','Главная'], ['chats','Чаты'], ['chatview','Внутри чата'],
     ['events','События'], ['ai','AI'], ['profile','Профиль'],
     ['settings','Настройки'], ['privacy','Политика'], ['admin','Админка'],
+    ['gate0','Условия 0/3'], ['gate1','Условия 1/3'],
   ].map(([k,l]) => \`<button data-preview="\${k}">\${l}</button>\`).join('');
   document.body.appendChild(bar);
 
@@ -240,6 +266,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const b = e.target.closest('[data-preview]');
     if (!b) return;
     const to = b.dataset.preview;
+    if (to === 'gate0' || to === 'gate1') {
+      window.PREVIEW_GATE_STEP = to === 'gate0' ? 0 : 1;
+      S.gate = null; S.error = null; loadAll();
+      window.scrollTo({ top:0 });
+      return;
+    }
     if (to === 'chatview') {
       S.chat = PREVIEW_CHATS[2]; S.chatTab = 'deleted'; S.msgSearch = '';
       S.tab = 'chatview'; loadMessages();

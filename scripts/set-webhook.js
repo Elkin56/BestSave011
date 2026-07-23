@@ -22,6 +22,7 @@ const body = {
     'message', 'edited_message',
     'channel_post', 'edited_channel_post',
     'my_chat_member',
+    'callback_query',
     'business_connection',
     'business_message',
     'edited_business_message',
