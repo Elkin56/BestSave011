@@ -20,8 +20,22 @@ import {
   getBusinessConnection, linkBusinessChat, getUserSettings, updateBotAdminFlag,
   // isQuietNow импортируется отдельно: чистая функция без БД
   firstSeenMedia,
+  // условия доступа
+  userExists, addReferral, countReferrals, getGatePassedAt, markGatePassed,
+  // сохранение по ответу
+  claimSavedByReply, releaseSavedByReply, saveTargetsForChat,
 } from '../lib/db.js';
 import { isQuietNow } from '../lib/quiet.js';
+import {
+  mediaTypeOf, mediaFileIdOf, mediaUniqueIdOf, forwardOriginDate,
+  MEDIA_RU, fmtWhen, chatTitleOf, senderNameOf,
+} from '../lib/media-info.js';
+import { replyTargetForSave, replyGistOf, buildCaption, sendSavedCopy } from '../lib/save-on-reply.js';
+import {
+  parseRefPayload, inviteLink, shareUrl, communityUrl, pluralFriends,
+  REQUIRED_INVITES, COMMUNITY_TITLE, SHARE_TEXT,
+} from '../lib/gate.js';
+import { checkSubscription } from '../lib/handlers/gate.js';
 
 const API = (token, method) => `https://api.telegram.org/bot${token}/${method}`;
 
@@ -43,58 +57,13 @@ async function tg(method, payload) {
   }
 }
 
-function mediaTypeOf(msg) {
-  if (msg.photo) return 'photo';
-  if (msg.video) return 'video';
-  if (msg.voice) return 'voice';
-  if (msg.video_note) return 'video_note';
-  if (msg.document) return 'document';
-  if (msg.animation) return 'animation';
-  if (msg.sticker) return 'sticker';
-  return null;
-}
-
-// file_unique_id — отпечаток файла. В отличие от file_id он одинаков для
-// одного и того же физического файла в любых чатах и не меняется со временем.
-// Это основа фейк-контроля: повторную присылку того же кружка видно по нему.
-function mediaUniqueIdOf(msg) {
-  if (msg.photo?.length) return msg.photo[msg.photo.length - 1].file_unique_id;
-  return (
-    msg.video?.file_unique_id || msg.voice?.file_unique_id || msg.video_note?.file_unique_id ||
-    msg.document?.file_unique_id || msg.animation?.file_unique_id || msg.sticker?.file_unique_id || null
-  );
-}
-
-// Дата оригинала у пересланного сообщения — Telegram отдаёт её честно.
-// Единственный случай, когда мы знаем настоящее время съёмки/записи.
-function forwardOriginDate(msg) {
-  return msg.forward_origin?.date || msg.forward_date || null;
-}
+// Разбор вложений (mediaTypeOf, mediaFileIdOf, mediaUniqueIdOf,
+// forwardOriginDate, MEDIA_RU, fmtWhen, chatTitleOf) живёт в lib/media-info.js:
+// теперь этим пользуется не только архивация, но и сохранение по ответу.
 
 // Медиа, которое имеет смысл проверять на «свежесть».
 // Стикеры и документы исключены: их повтор — обычное дело, а не обман.
 const FAKE_CHECKED = new Set(['photo', 'video', 'voice', 'video_note', 'animation']);
-
-const MEDIA_RU = {
-  photo: 'фото', video: 'видео', voice: 'голосовое',
-  video_note: 'кружок', animation: 'GIF', document: 'файл', sticker: 'стикер',
-};
-
-function fmtWhen(d) {
-  return new Date(d).toLocaleString('ru-RU', {
-    day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
-  });
-}
-// file_id вложения: по нему бот скачивает файл через getFile.
-// Он остаётся рабочим и после удаления сообщения — за счёт этого
-// удалённые фото и голосовые можно смотреть прямо в приложении.
-function mediaFileIdOf(msg) {
-  if (msg.photo?.length) return msg.photo[msg.photo.length - 1].file_id; // максимальный размер
-  return (
-    msg.video?.file_id || msg.voice?.file_id || msg.video_note?.file_id ||
-    msg.document?.file_id || msg.animation?.file_id || msg.sticker?.file_id || null
-  );
-}
 
 // Схему инициализируем один раз на тёплый контейнер, а не на каждый апдейт.
 let schemaReady = false;
@@ -148,6 +117,9 @@ async function route(update) {
   // ── бота добавили/сняли/сменили права ──
   if (update.my_chat_member) return onMyChatMember(update.my_chat_member);
 
+  // ── нажатия на inline-кнопки (проверка условий доступа) ──
+  if (update.callback_query) return onCallback(update.callback_query);
+
   const msg = update.message || update.channel_post;
   const edited = update.edited_message || update.edited_channel_post;
 
@@ -183,16 +155,176 @@ async function getMe() {
   return meCache;
 }
 
+// ─── условия доступа ───
+//
+// Пока человек не подписан на канал и не привёл REQUIRED_INVITES друзей,
+// бот показывает экран условий вместо работы. Архивацию это не ломает:
+// чаты, куда бот уже добавлен, продолжают сохраняться — гейт закрывает
+// доступ к архиву, а не выбрасывает данные.
+
+// Текущее состояние условий для пользователя.
+async function gateFor(tgId) {
+  const passedAt = await db(() => getGatePassedAt(tgId));
+  if (passedAt) return { passed: true, subscribed: true, invites: REQUIRED_INVITES };
+
+  const [subscribed, invites] = await Promise.all([
+    checkSubscription(tgId),
+    db(() => countReferrals(tgId)),
+  ]);
+  const n = invites || 0;
+  const passed = subscribed === true && n >= REQUIRED_INVITES;
+  if (passed) await db(() => markGatePassed(tgId));
+  return { passed, subscribed, invites: n };
+}
+
+function gateKeyboard(botUsername, tgId) {
+  return {
+    inline_keyboard: [
+      [{ text: `📣 Подписаться на ${COMMUNITY_TITLE}`, url: communityUrl() }],
+      [{ text: '🤝 Позвать друзей', url: shareUrl(botUsername, tgId) }],
+      [{ text: '✅ Я всё сделал — проверить', callback_data: 'gate:check' }],
+    ],
+  };
+}
+
+function gateText(state) {
+  const left = Math.max(0, REQUIRED_INVITES - state.invites);
+  const sub = state.subscribed === true ? '✅'
+    : state.subscribed === null ? '❔' : '⬜️';
+  const inv = state.invites >= REQUIRED_INVITES ? '✅' : '⬜️';
+
+  return '🔓 Осталось два шага до доступа\n\n' +
+    `${sub} 1. Подписаться на канал ${COMMUNITY_TITLE}\n` +
+    (state.subscribed === null
+      ? '     (проверить подписку не удалось — попробуйте ещё раз через минуту)\n'
+      : '') +
+    `${inv} 2. Пригласить друзей: ${state.invites} из ${REQUIRED_INVITES}\n` +
+    (left > 0 ? `     осталось ${left} ${pluralFriends(left)}\n` : '') +
+    '\nПочему так: BestSave бесплатный и живёт за счёт тех, кто про него ' +
+    'рассказал. Канал — чтобы вы узнали об обновлениях, приглашения — чтобы ' +
+    'проект рос.\n\n' +
+    'Нажмите «Позвать друзей» — Telegram сам предложит выбрать чат, текст со ' +
+    'ссылкой уже готов.';
+}
+
+// Отправить экран условий. Возвращает true, если доступ уже открыт.
+async function sendGateIfNeeded(chatId, tgId) {
+  const state = await gateFor(tgId);
+  if (state.passed) return true;
+
+  const me = await getMe();
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text: gateText(state),
+    reply_markup: gateKeyboard(me?.username, tgId),
+    disable_web_page_preview: true,
+  });
+  return false;
+}
+
+// Нажатие на inline-кнопку. Пока обрабатываем только проверку условий.
+async function onCallback(cq) {
+  const data = cq.data || '';
+  const tgId = cq.from?.id;
+  const chatId = cq.message?.chat?.id;
+  if (!tgId) return;
+
+  if (data !== 'gate:check') {
+    await tg('answerCallbackQuery', { callback_query_id: cq.id });
+    return;
+  }
+
+  const state = await gateFor(tgId);
+
+  // Короткий ответ во всплывашке — чтобы человек сразу понял результат,
+  // не вчитываясь в перерисованное сообщение.
+  await tg('answerCallbackQuery', {
+    callback_query_id: cq.id,
+    text: state.passed
+      ? '✅ Готово! Доступ открыт'
+      : state.subscribed !== true
+        ? 'Подписка на канал пока не видна'
+        : `Ещё ${REQUIRED_INVITES - state.invites} ${pluralFriends(REQUIRED_INVITES - state.invites)}`,
+    show_alert: !state.passed,
+  });
+
+  if (!chatId) return;
+
+  if (state.passed) {
+    await tg('editMessageText', {
+      chat_id: chatId,
+      message_id: cq.message.message_id,
+      text: '✅ Условия выполнены — доступ открыт!\n\n' +
+        'Спасибо, что позвали друзей. Открывайте архив кнопкой меню слева ' +
+        'или командой /start.',
+    });
+    return;
+  }
+
+  // Перерисовываем экран с актуальными галочками. Если текст не изменился,
+  // Telegram отвечает ошибкой «message is not modified» — это нормально
+  // и намеренно игнорируется.
+  const me = await getMe();
+  await tg('editMessageText', {
+    chat_id: chatId,
+    message_id: cq.message.message_id,
+    text: gateText(state),
+    reply_markup: gateKeyboard(me?.username, tgId),
+    disable_web_page_preview: true,
+  });
+}
+
+// Засчитать приглашение по deep-link /start ref<id>.
+// Считается только НОВЫЙ человек: иначе давний пользователь открывал бы
+// чужие ссылки и раздавал приглашения из воздуха.
+async function creditReferral(payload, from) {
+  const inviter = parseRefPayload(payload);
+  if (!inviter || !from?.id || inviter === from.id) return;
+
+  const existed = await db(() => userExists(from.id));
+  // existed === null означает, что база не ответила: в этом случае лучше
+  // не засчитать честного друга, чем засчитать несуществующего.
+  if (existed !== false) return;
+
+  const added = await db(() => addReferral(inviter, from.id));
+  if (!added) return;
+
+  const total = await db(() => countReferrals(inviter));
+  const left = Math.max(0, REQUIRED_INVITES - (total || 0));
+  const who = from.first_name ? `${from.first_name} ` : '';
+
+  await tg('sendMessage', {
+    chat_id: inviter,
+    text: left > 0
+      ? `🤝 ${who}перешёл по вашей ссылке — засчитано ${total} из ${REQUIRED_INVITES}.\n\n` +
+        `Осталось ${left} ${pluralFriends(left)}.`
+      : `🎉 ${who}перешёл по вашей ссылке — это ${total}-й друг!\n\n` +
+        'Условие по приглашениям выполнено. Нажмите /start, чтобы проверить доступ.',
+  });
+}
+
 // ─── команды ───
 async function onCommand(msg) {
   const isPrivate = msg.chat.type === 'private';
   // В группе команда приходит как "/start@bestsaves_bot" — отрезаем имя бота.
   const cmd = msg.text.split(/[\s@]/)[0].toLowerCase();
+  // Полезная нагрузка deep-link: "/start ref123456".
+  const payload = msg.text.split(/\s+/)[1] || '';
+
+  // Порядок важен: реферал считается до upsertUser, потому что признак
+  // «новый человек» существует ровно до момента, когда мы его записали.
+  if (cmd === '/start' && isPrivate && payload) {
+    await creditReferral(payload, msg.from);
+  }
 
   if (msg.from) await db(() => upsertUser(msg.from));
 
   if (cmd === '/start') {
     if (isPrivate) {
+      // Условия доступа проверяем до приветствия: показывать инструкцию по
+      // подключению тому, кто ещё не может открыть архив, — только путать.
+      if (!(await sendGateIfNeeded(msg.chat.id, msg.from?.id))) return;
+
       const me = await getMe();
       const uname = me?.username ? '@' + me.username : 'этого бота';
       await tg('sendMessage', {
@@ -206,6 +338,8 @@ async function onCommand(msg) {
           'Настройки → Telegram Business → Чат-боты → впишите ' + uname + '\n' +
           'Так я архивирую ваши личные переписки и ловлю удаление сообщений. ' +
           'Требуется Telegram Premium.\n\n' +
+          '💾 Быстрое сохранение: ответьте в подключённом чате на любой файл — ' +
+          'хоть точкой — и его копия придёт сюда.\n\n' +
           'Открыть архив — кнопка меню слева.',
       });
     } else {
@@ -242,7 +376,37 @@ async function onCommand(msg) {
         '• то же самое, плюс ловлю удаление в момент удаления\n' +
         '• подключение: Настройки → Telegram Business → Чат-боты\n' +
         '• нужен Telegram Premium\n\n' +
-        'Чужие переписки, где вас нет, я не вижу — и не пытаюсь.',
+        '💾 ОТВЕТ = СОХРАНИТЬ\n' +
+        'Ответьте в подключённом чате на фото, видео, голосовое, кружок, GIF ' +
+        'или файл — хоть точкой. Копия сразу придёт сюда, в личку со мной.\n' +
+        'Отключается в приложении: Настройки → Сохранение по ответу.\n\n' +
+        'Чужие переписки, где вас нет, я не вижу — и не пытаюсь.\n\n' +
+        '🤝 /invite — ваша ссылка для друзей и статус условий доступа.',
+    });
+    return;
+  }
+
+  if (cmd === '/invite') {
+    if (!isPrivate) return;
+    const tgId = msg.from?.id;
+    const me = await getMe();
+    const state = await gateFor(tgId);
+    const left = Math.max(0, REQUIRED_INVITES - state.invites);
+
+    await tg('sendMessage', {
+      chat_id: msg.chat.id,
+      text:
+        `🤝 Приглашено друзей: ${state.invites} из ${REQUIRED_INVITES}` +
+        (left > 0 ? ` — осталось ${left} ${pluralFriends(left)}` : ' — условие выполнено ✅') +
+        '\n\nВаша личная ссылка:\n' + inviteLink(me?.username, tgId) +
+        '\n\nНажмите кнопку ниже — Telegram сам предложит выбрать чат, ' +
+        'текст со ссылкой уже готов.',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '📤 Поделиться с друзьями', url: shareUrl(me?.username, tgId) }],
+        ],
+      },
+      disable_web_page_preview: true,
     });
     return;
   }
@@ -263,7 +427,7 @@ async function onCommand(msg) {
   if (isPrivate) {
     await tg('sendMessage', {
       chat_id: msg.chat.id,
-      text: 'Команды: /start — начать, /help — как это работает, /status — проверка связи.',
+      text: 'Команды: /start — начать, /invite — позвать друзей, /help — как это работает, /status — проверка связи.',
     });
   }
 }
@@ -311,9 +475,79 @@ async function onMyChatMember(ev) {
   });
 }
 
+// ─── СОХРАНЕНИЕ ПО ОТВЕТУ ───
+//
+// Ответ на файл — это команда «сохрани». Копия уходит в личку владельцу архива
+// вместе с подписью: что, откуда, когда и кто сохранил.
+//
+// Доступ к чату при этом НЕ расширяется: работает только там, где бот уже
+// подключён — админом в группе или через Telegram Business самим владельцем
+// аккаунта. Новых чатов бот так не видит.
+//
+// targets: [{ tgId, chatId, quietHours, quietFrom, quietTo, tzOffsetMin }]
+//   tgId   — владелец архива (ключ дедупликации)
+//   chatId — куда слать копию (личка с ботом)
+async function runSaveOnReply({ msg, chatRowId, targets, ownerTgId = null }) {
+  const media = replyTargetForSave(msg);
+  if (!media || !targets?.length) return;
+
+  const mediaType = mediaTypeOf(media);
+
+  // Оригинал мог не попасть в архив: бота могли добавить в чат позже файла.
+  // Раз уж мы держим его в руках — кладём, тогда он виден и в приложении.
+  await db(() => saveMessage({
+    chatId: chatRowId,
+    tgMsgId: media.message_id,
+    senderTgId: media.from?.id || media.sender_chat?.id || null,
+    senderName: media.from?.first_name || media.sender_chat?.title || null,
+    text: media.caption || null,
+    mediaType,
+    mediaFileId: mediaFileIdOf(media),
+    mediaUniqueId: mediaUniqueIdOf(media),
+    origSentAt: forwardOriginDate(media),
+    ownerTgId,
+    sentAt: media.date,
+  }));
+
+  const caption = buildCaption({
+    mediaType,
+    chatTitle: chatTitleOf(msg.chat),
+    senderName: senderNameOf(media),
+    sentAt: media.date,
+    replierName: senderNameOf(msg),
+    replyGist: replyGistOf(msg),
+    origCaption: media.caption,
+  });
+
+  for (const t of targets) {
+    // Дедупликация: на один файл могут ответить пятеро — копия нужна одна.
+    // null означает «база не ответила»: тогда лучше прислать копию дважды,
+    // чем не прислать вовсе. Продукт существует ради несохранённого файла.
+    const claimed = await db(() => claimSavedByReply(t.tgId, chatRowId, media.message_id, mediaType));
+    if (claimed === false) continue;
+
+    const sent = await sendSavedCopy(tg, {
+      chatId: t.chatId,
+      media,
+      caption,
+      // Тихие часы не отменяют сохранение — файл может быть удалён к утру.
+      // Отменяют только звук: сообщение придёт молча.
+      silent: isQuietNow(t),
+    });
+
+    // Не доставили (бот заблокирован, лимит, сбой сети) — снимаем отметку,
+    // иначе следующий ответ на этот же файл посчитает его уже сохранённым.
+    if (!sent.ok && claimed === true) {
+      await db(() => releaseSavedByReply(t.tgId, chatRowId, media.message_id));
+    }
+  }
+}
+
 // ─── архивация в группе ───
 async function onGroupMessage(msg) {
-  await db(async () => {
+  // id чата возвращаем наружу: он же нужен сохранению по ответу,
+  // а второй upsertChat на каждое сообщение — лишний поход в базу.
+  const chatRowId = await db(async () => {
     const chatId = await upsertChat(msg.chat);
     const sender = msg.from || msg.sender_chat || {};
     await saveMessage({
@@ -326,6 +560,20 @@ async function onGroupMessage(msg) {
       mediaFileId: mediaFileIdOf(msg),
       sentAt: msg.date,
     });
+    return chatId;
+  });
+
+  // Получатели в группе — те, кто этот чат подключил.
+  if (!chatRowId || !replyTargetForSave(msg)) return;
+
+  const owners = await db(() => saveTargetsForChat(chatRowId));
+  if (!owners?.length) return;
+
+  await runSaveOnReply({
+    msg,
+    chatRowId,
+    // Личный чат с ботом имеет chat_id, равный tg id пользователя.
+    targets: owners.map((o) => ({ ...o, chatId: o.tgId })),
   });
 }
 
@@ -421,6 +669,23 @@ async function onBusinessMessage(msg) {
     if (firstSeen || (origDate && !fromOwner)) {
       await notifyFake(owner, msg, mediaType, firstSeen, origDate);
     }
+
+    // ── Сохранение по ответу ──
+    // В личном чате владелец один и известен точно, поэтому получатель ровно
+    // один — сам владелец бизнес-аккаунта.
+    if (replyTargetForSave(msg)) {
+      const s = await getUserSettings(owner);
+      if (!s.saveOnReply) return;
+      const bc = await getBusinessConnection(msg.business_connection_id);
+      if (!bc?.user_chat_id) return;
+
+      await runSaveOnReply({
+        msg,
+        chatRowId: chatId,
+        ownerTgId: owner,
+        targets: [{ ...s, tgId: owner, chatId: Number(bc.user_chat_id) }],
+      });
+    }
   });
 }
 
@@ -486,13 +751,6 @@ async function onBusinessEdit(msg) {
       }
     }
   });
-}
-
-// Имя личного чата для уведомлений
-function chatTitleOf(chat) {
-  return chat?.title ||
-    [chat?.first_name, chat?.last_name].filter(Boolean).join(' ') ||
-    (chat?.username ? '@' + chat.username : 'чат');
 }
 
 // НАСТОЯЩЕЕ событие удаления — доступно только в Business-режиме.

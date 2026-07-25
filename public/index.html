@@ -185,6 +185,11 @@
   .tag.violet{color:#C4B5FD}
   .tag.biz{color:#93C5D8}
   .tag.gold{color:#FCD34D}
+  /* Плашка владельца: единственное место, где цвет заливается плотнее —
+     статус должен читаться с одного взгляда рядом с именем. */
+  .tag.owner{color:#FF7A7A;background:rgba(251,113,133,.15);
+    border-color:rgba(251,113,133,.34);letter-spacing:.2px}
+  .tag.blue{color:var(--blue)}
 
   /* ── Фильтры-пилюли ── */
   .filters{display:flex;gap:9px;overflow-x:auto;padding:16px 16px 6px;scrollbar-width:none}

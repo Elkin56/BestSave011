@@ -242,9 +242,13 @@ describe('фейк-контроль', () => {
 
   test('отпечаток файла сохраняется отдельно от file_id', () => {
     // file_id у одного и того же файла разный для разных ботов и чатов,
-    // сравнивать по нему нельзя — нужен file_unique_id
-    assert.match(bot, /function mediaUniqueIdOf/);
-    assert.match(bot, /file_unique_id/);
+    // сравнивать по нему нельзя — нужен file_unique_id.
+    // Разбор вложений живёт в lib/media-info.js: им пользуется и архивация,
+    // и сохранение по ответу.
+    const mi = readFileSync(join(ROOT, 'lib', 'media-info.js'), 'utf8');
+    assert.match(mi, /function mediaUniqueIdOf/);
+    assert.match(mi, /file_unique_id/);
+    assert.match(bot, /mediaUniqueIdOf/);
     assert.match(db, /INSERT INTO message[\s\S]*media_unique_id/);
   });
 

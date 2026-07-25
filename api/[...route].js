@@ -20,6 +20,7 @@ import diag from '../lib/handlers/diag.js';
 import erase from '../lib/handlers/erase.js';
 import events from '../lib/handlers/events.js';
 import exportChat from '../lib/handlers/export.js';
+import gate from '../lib/handlers/gate.js';
 import health from '../lib/handlers/health.js';
 import me from '../lib/handlers/me.js';
 import media from '../lib/handlers/media.js';
@@ -28,6 +29,10 @@ import pin from '../lib/handlers/pin.js';
 import settings from '../lib/handlers/settings.js';
 import setup from '../lib/handlers/setup.js';
 import stats from '../lib/handlers/stats.js';
+import { loadGate } from '../lib/handlers/gate.js';
+import {
+  verifyInitData, verifyResourceToken, initDataFromHeader, parseAdminIds,
+} from '../lib/auth.js';
 
 // Ключ — первый сегмент пути после /api/. Ключи должны совпадать
 // с прежними именами файлов, чтобы фронтенд не менять.
@@ -41,6 +46,7 @@ const routes = {
   erase,
   events,
   export: exportChat,
+  gate,
   health,
   me,
   media,
@@ -60,5 +66,58 @@ export default async function handler(req, res) {
   const fn = routes[seg];
   if (!fn) return res.status(404).json({ error: 'not found', route: seg || null });
 
+  if (GATED.has(seg) && !(await passesGate(req, res))) return;
+
   return fn(req, res);
+}
+
+// ─── Условия доступа ───
+//
+// Проверка стоит здесь, а не в каждом обработчике: список гейтом закрытых
+// маршрутов виден одним взглядом, и новый эндпоинт нельзя забыть закрыть —
+// его просто добавляют в GATED.
+//
+// НЕ гейтим: gate (сам экран условий), me (нужен профиль и токен),
+// bot-info, health, diag, setup — служебные, данных архива не отдают.
+const GATED = new Set([
+  'stats', 'chats', 'messages', 'activity', 'events',
+  'export', 'media', 'avatar', 'pin', 'settings', 'erase',
+]);
+
+/**
+ * true — можно пропускать дальше. При отказе сам отвечает и возвращает false.
+ * Владельцы продукта гейт не проходят: запирать себя же от собственных
+ * метрик — верный способ однажды остаться без доступа к проду.
+ */
+async function passesGate(req, res) {
+  const token = process.env.BOT_TOKEN;
+
+  // Пользователь приходит либо с initData (обычные запросы), либо с
+  // ресурсным токеном в ?t= (картинки, аудио, выгрузка).
+  let tgUser = null;
+  const v = verifyInitData(initDataFromHeader(req), token);
+  if (v.ok) tgUser = v.user;
+  else {
+    const t = typeof req.query?.t === 'string' ? req.query.t : null;
+    const r = verifyResourceToken(t, token);
+    if (r.ok) tgUser = { id: r.userId };
+  }
+
+  // Не авторизован — это не забота гейта: пусть обработчик отдаст свою 401
+  // со своей причиной, иначе диагностика превращается в гадание.
+  if (!tgUser) return true;
+
+  if (parseAdminIds(process.env.ADMIN_TG_IDS).includes(String(tgUser.id))) return true;
+
+  try {
+    const state = await loadGate(tgUser);
+    if (state.passed) return true;
+    res.status(403).json({ error: 'gate_required', gate: state });
+    return false;
+  } catch (e) {
+    // База лежит — гейт не должен превращаться в глухую стену поверх
+    // и без того сломанного запроса. Пропускаем, обработчик отдаст свою ошибку.
+    console.error('gate guard:', e?.message);
+    return true;
+  }
 }
