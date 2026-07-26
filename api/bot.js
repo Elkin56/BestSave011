@@ -18,6 +18,7 @@ import {
   ensureSchema, upsertUser, upsertChat, linkChat,
   saveMessage, applyEdit, saveBusinessConnection, markDeleted,
   getBusinessConnection, linkBusinessChat, getUserSettings, updateBotAdminFlag,
+  replaceMediaFileId,
   // isQuietNow импортируется отдельно: чистая функция без БД
   firstSeenMedia,
   // приглашения (счётчик друзей; условием доступа больше не являются)
@@ -532,11 +533,14 @@ async function onBusinessMessage(msg) {
     }
 
     // ── Самоуничтожающиеся фото/видео/голосовые (таймер в личных чатах) ──
-    // Telegram отдаёт TTL прямо в сообщении. Ловим это ДО истечения таймера:
-    // file_id уже у нас в руках, поэтому сохраняем как обычно и сразу же
-    // шлём владельцу копию — тем же способом, что и «сохранение по ответу»,
-    // а не через скачивание на диск: у serverless-функции нет постоянной
-    // файловой системы, локальный файл всё равно бы не пережил вызов.
+    // Telegram отдаёт TTL прямо в сообщении, но выданный при этом file_id
+    // «горит» вместе с оригиналом: ни getFile, ни повторная отправка по
+    // этому же file_id после этого не работают — иначе таймер ничего бы не
+    // защищал. Единственное окно, где у нас есть доступ к самим байтам, —
+    // прямо сейчас, пока апдейт свежий. Поэтому: скачиваем файл немедленно
+    // и тут же перезаливаем его как НОВЫЙ файл в личку владельцу — это
+    // создаёт обычный, не привязанный к таймеру file_id, который потом
+    // нормально открывается в приложении.
     const selfDestruct = isSelfDestructing(msg);
     const ttlSeconds = selfDestruct ? getTTL(msg) : null;
 
@@ -566,7 +570,10 @@ async function onBusinessMessage(msg) {
     }
 
     if (selfDestruct && mediaFileIdOf(msg)) {
-      await notifySelfDestruct(owner, msg, mediaType, ttlSeconds);
+      await rearchiveSelfDestructMedia({
+        owner, msg, mediaType, ttlSeconds,
+        chatRowId: chatId,
+      });
     }
 
     // ── Сохранение по ответу ──
@@ -619,27 +626,106 @@ async function notifyFake(owner, msg, mediaType, firstSeen, origDate) {
   await tg('sendMessage', { chat_id: Number(bc.user_chat_id), text });
 }
 
-// Файл с таймером самоуничтожения: пока таймер не истёк, у нас есть file_id,
-// и мы можем прислать копию — точно так же, как при «сохранении по ответу».
-// Тихие часы, как и там, не отменяют доставку: файл не переживёт утро.
-async function notifySelfDestruct(owner, msg, mediaType, ttlSeconds) {
+// Метод и поле для перезаливки каждого типа медиа. video_note/voice подписи
+// не поддерживают — она уходит отдельным сообщением, как и в save-on-reply.js.
+const REUPLOAD = {
+  photo: { method: 'sendPhoto', field: 'photo', caption: true, resultKey: 'photo', pickLast: true },
+  video: { method: 'sendVideo', field: 'video', caption: true, resultKey: 'video' },
+  voice: { method: 'sendVoice', field: 'voice', caption: false, resultKey: 'voice' },
+  video_note: { method: 'sendVideoNote', field: 'video_note', caption: false, resultKey: 'video_note' },
+};
+
+// Multipart-загрузка в Telegram (обычный tg() умеет только JSON и не годится
+// для отправки самих байтов файла).
+async function tgUpload(method, field, buf, filename, extra = {}) {
+  const token = process.env.BOT_TOKEN;
+  if (!token) { console.error('BOT_TOKEN не задан'); return { ok: false }; }
+  const form = new FormData();
+  for (const [k, v] of Object.entries(extra)) {
+    if (v !== undefined && v !== null) form.append(k, String(v));
+  }
+  form.append(field, new Blob([buf]), filename);
+  try {
+    const r = await fetch(API(token, method), { method: 'POST', body: form });
+    const json = await r.json();
+    if (!json.ok) console.error('telegram upload:', method, json.description);
+    return json;
+  } catch (e) {
+    console.error('telegram upload failed:', method, e?.message);
+    return { ok: false };
+  }
+}
+
+// Файл с таймером самоуничтожения. У полученного file_id уже сейчас может не
+// быть доступа через getFile — Telegram не даёт скачивать TTL-медиа так же
+// свободно, как обычное, это часть их гарантии приватности. Поэтому здесь
+// НЕ полагаемся на file_id вообще: скачиваем сырые байты (может не выйти —
+// тогда честно логируем и молчим, подделывать успех нет смысла) и заливаем
+// их заново как отдельное сообщение владельцу. Новый file_id, который вернёт
+// Telegram на этот аплоад, уже обычный — им заменяем в БД TTL-шный.
+async function rearchiveSelfDestructMedia({ owner, msg, mediaType, ttlSeconds, chatRowId }) {
+  const spec = REUPLOAD[mediaType];
+  const fileId = mediaFileIdOf(msg);
+  if (!spec || !fileId) return;
+
   const bc = await getBusinessConnection(msg.business_connection_id);
   if (!bc?.user_chat_id) return;
+
+  const token = process.env.BOT_TOKEN;
+  if (!token) return;
+
+  const gf = await tg('getFile', { file_id: fileId });
+  if (!gf.ok || !gf.result?.file_path) {
+    console.warn(`self-destruct: getFile отказал для ${owner} (${gf.description || 'нет причины'}) — ` +
+      `похоже, Telegram уже закрыл доступ к TTL-файлу, копию сделать не удалось`);
+    return;
+  }
+
+  const fileRes = await fetch(`https://api.telegram.org/file/bot${token}/${gf.result.file_path}`);
+  if (!fileRes.ok) {
+    console.warn(`self-destruct: не удалось скачать файл для ${owner} (HTTP ${fileRes.status})`);
+    return;
+  }
+  const buf = Buffer.from(await fileRes.arrayBuffer());
+  const filename = gf.result.file_path.split('/').pop() || 'file';
 
   const s = await getUserSettings(owner);
   const what = MEDIA_RU[mediaType] || 'медиа';
   const who = chatTitleOf(msg.chat);
-  const ttlText = ttlSeconds ? ` (таймер: ${ttlSeconds} сек)` : '';
+  const ttlText = ttlSeconds ? ` · таймер ${ttlSeconds} сек` : '';
+  const caption = `⏳ Самоуничтожающееся ${what} из чата «${who}»${ttlText} — сохранено до истечения таймера.`;
 
-  const sent = await sendSavedCopy(tg, {
-    chatId: Number(bc.user_chat_id),
-    media: msg,
-    caption: `⏳ Самоуничтожающееся ${what} из чата «${who}»${ttlText} — сохранено до истечения таймера.`,
-    silent: isQuietNow(s),
-  });
+  const extra = {
+    chat_id: Number(bc.user_chat_id),
+    disable_notification: isQuietNow(s) ? 'true' : undefined,
+  };
+  if (spec.caption) extra.caption = caption;
 
-  if (!sent.ok) {
-    console.warn(`self-destruct: не удалось доставить копию владельцу ${owner}`);
+  const sent = await tgUpload(spec.method, spec.field, buf, filename, extra);
+  if (!sent?.ok) {
+    console.warn(`self-destruct: не удалось перезалить копию владельцу ${owner}`);
+    return;
+  }
+
+  // Кружок/голосовое подпись не приняли — досылаем отдельным сообщением-ответом.
+  if (!spec.caption) {
+    await tg('sendMessage', {
+      chat_id: Number(bc.user_chat_id),
+      text: caption,
+      reply_to_message_id: sent.result?.message_id,
+      disable_notification: isQuietNow(s),
+      allow_sending_without_reply: true,
+    });
+  }
+
+  // Достаём новый, уже не TTL-шный file_id из ответа Telegram и заменяем
+  // им обречённый оригинал — теперь /api/media сможет его открыть.
+  const resultObj = sent.result?.[spec.resultKey];
+  const newFileId = spec.pickLast && Array.isArray(resultObj)
+    ? resultObj[resultObj.length - 1]?.file_id
+    : resultObj?.file_id;
+  if (newFileId) {
+    await db(() => replaceMediaFileId(chatRowId, msg.message_id, owner, newFileId));
   }
 }
 
