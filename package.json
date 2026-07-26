@@ -9,7 +9,9 @@
   },
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",
-    "setup-webhook": "node scripts/set-webhook.js"
+    "setup-webhook": "node scripts/set-webhook.js",
+    "test:destruct": "node scripts/check-self-destruct.js",
+    "test:all": "npm run test && npm run test:destruct"
   },
   "dependencies": {
     "pg": "^8.13.1"

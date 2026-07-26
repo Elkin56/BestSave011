@@ -32,6 +32,7 @@ import {
 } from '../lib/media-info.js';
 import { replyTargetForSave, replyGistOf, buildCaption, sendSavedCopy } from '../lib/save-on-reply.js';
 import { parseRefPayload, inviteLink, shareUrl, pluralFriends } from '../lib/invite.js';
+import { isSelfDestructing, getTTL } from '../lib/self-destruct.js';
 
 const API = (token, method) => `https://api.telegram.org/bot${token}/${method}`;
 
@@ -530,6 +531,15 @@ async function onBusinessMessage(msg) {
       firstSeen = await firstSeenMedia(owner, uniqueId);
     }
 
+    // ── Самоуничтожающиеся фото/видео/голосовые (таймер в личных чатах) ──
+    // Telegram отдаёт TTL прямо в сообщении. Ловим это ДО истечения таймера:
+    // file_id уже у нас в руках, поэтому сохраняем как обычно и сразу же
+    // шлём владельцу копию — тем же способом, что и «сохранение по ответу»,
+    // а не через скачивание на диск: у serverless-функции нет постоянной
+    // файловой системы, локальный файл всё равно бы не пережил вызов.
+    const selfDestruct = isSelfDestructing(msg);
+    const ttlSeconds = selfDestruct ? getTTL(msg) : null;
+
     await saveMessage({
       chatId,
       tgMsgId: msg.message_id,
@@ -543,6 +553,8 @@ async function onBusinessMessage(msg) {
       origSentAt: origDate,
       ownerTgId: owner,
       sentAt: msg.date,
+      isSelfDestruct: selfDestruct,
+      ttlSeconds,
     });
 
     // Связываем чат с владельцем бизнес-аккаунта.
@@ -551,6 +563,10 @@ async function onBusinessMessage(msg) {
 
     if (firstSeen || (origDate && !fromOwner)) {
       await notifyFake(owner, msg, mediaType, firstSeen, origDate);
+    }
+
+    if (selfDestruct && mediaFileIdOf(msg)) {
+      await notifySelfDestruct(owner, msg, mediaType, ttlSeconds);
     }
 
     // ── Сохранение по ответу ──
@@ -601,6 +617,30 @@ async function notifyFake(owner, msg, mediaType, firstSeen, origDate) {
   }
 
   await tg('sendMessage', { chat_id: Number(bc.user_chat_id), text });
+}
+
+// Файл с таймером самоуничтожения: пока таймер не истёк, у нас есть file_id,
+// и мы можем прислать копию — точно так же, как при «сохранении по ответу».
+// Тихие часы, как и там, не отменяют доставку: файл не переживёт утро.
+async function notifySelfDestruct(owner, msg, mediaType, ttlSeconds) {
+  const bc = await getBusinessConnection(msg.business_connection_id);
+  if (!bc?.user_chat_id) return;
+
+  const s = await getUserSettings(owner);
+  const what = MEDIA_RU[mediaType] || 'медиа';
+  const who = chatTitleOf(msg.chat);
+  const ttlText = ttlSeconds ? ` (таймер: ${ttlSeconds} сек)` : '';
+
+  const sent = await sendSavedCopy(tg, {
+    chatId: Number(bc.user_chat_id),
+    media: msg,
+    caption: `⏳ Самоуничтожающееся ${what} из чата «${who}»${ttlText} — сохранено до истечения таймера.`,
+    silent: isQuietNow(s),
+  });
+
+  if (!sent.ok) {
+    console.warn(`self-destruct: не удалось доставить копию владельцу ${owner}`);
+  }
 }
 
 async function onBusinessEdit(msg) {
