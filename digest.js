@@ -138,17 +138,6 @@ export async function ensureSchema() {
     -- Дата оригинала для пересланных сообщений: Telegram отдаёт её честно
     ALTER TABLE message ADD COLUMN IF NOT EXISTS orig_sent_at TIMESTAMPTZ;
 
-    -- ══ САМОУНИЧТОЖАЮЩИЕСЯ МЕДИА ══
-    -- Поля для отслеживания и сохранения исчезающих фото, кружков, видео
-    ALTER TABLE message ADD COLUMN IF NOT EXISTS is_self_destruct BOOLEAN NOT NULL DEFAULT false;
-    ALTER TABLE message ADD COLUMN IF NOT EXISTS ttl_seconds INTEGER;
-    ALTER TABLE message ADD COLUMN IF NOT EXISTS saved_before_destruct BOOLEAN NOT NULL DEFAULT false;
-    ALTER TABLE message ADD COLUMN IF NOT EXISTS destructed_at TIMESTAMPTZ;
-    ALTER TABLE message ADD COLUMN IF NOT EXISTS local_file_path TEXT; -- путь к локальной копии файла
-
-    -- Индекс для быстрого поиска самоуничтожающихся сообщений
-    CREATE INDEX IF NOT EXISTS idx_message_self_destruct ON message (is_self_destruct) WHERE is_self_destruct = true;
-
     -- Настройки уведомлений (бот пишет в личку при удалении/изменении в Business-чатах)
     ALTER TABLE app_user ADD COLUMN IF NOT EXISTS notify_deleted BOOLEAN NOT NULL DEFAULT true;
     ALTER TABLE app_user ADD COLUMN IF NOT EXISTS notify_edited  BOOLEAN NOT NULL DEFAULT false;
@@ -165,25 +154,28 @@ export async function ensureSchema() {
     ALTER TABLE app_user ADD COLUMN IF NOT EXISTS tz_offset_min INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE app_user ADD COLUMN IF NOT EXISTS is_premium BOOLEAN NOT NULL DEFAULT false;
 
-    -- ── Сохранение по ответу ──
-    -- Ответ на файл в подключённом чате = «сохрани это»: бот присылает копию
-    -- в личку. По умолчанию включено — это основной жест продукта.
-    ALTER TABLE app_user ADD COLUMN IF NOT EXISTS save_on_reply BOOLEAN NOT NULL DEFAULT true;
+    -- ── Отложенные уведомления (дайджест) ──
+    -- Режим доставки: instant | hourly | daily | silent.
+    ALTER TABLE app_user ADD COLUMN IF NOT EXISTS notify_mode TEXT NOT NULL DEFAULT 'instant';
 
-    -- Что уже сохранено. Нужно, потому что на один файл могут ответить
-    -- несколько раз (и несколько человек) — а копия в личке нужна одна.
-    -- Первичный ключ и делает всю работу: повтор отсекается вставкой,
-    -- а не проверкой «сначала посмотрим, потом вставим», которая в
-    -- параллельных вызовах serverless-функции пропускает дубли.
-    CREATE TABLE IF NOT EXISTS saved_by_reply (
-      owner_tg_id  BIGINT NOT NULL,
-      chat_id      BIGINT NOT NULL REFERENCES chat(id) ON DELETE CASCADE,
-      tg_msg_id    BIGINT NOT NULL,
-      media_type   TEXT,
-      saved_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-      PRIMARY KEY (owner_tg_id, chat_id, tg_msg_id)
+    -- Очередь событий, ожидающих отправки. Живёт минутами или часами,
+    -- поэтому никаких внешних ключей на message: событие самодостаточно,
+    -- всё нужное для текста лежит прямо здесь.
+    --
+    -- target_chat_id хранится вместе с событием намеренно: при отправке
+    -- бизнес-подключения может уже не быть (человек отключил бота), и искать
+    -- адресата в тот момент поздно.
+    CREATE TABLE IF NOT EXISTS pending_notice (
+      id             BIGSERIAL PRIMARY KEY,
+      owner_tg_id    BIGINT NOT NULL,
+      target_chat_id BIGINT NOT NULL,
+      kind           TEXT NOT NULL,
+      chat_title     TEXT,
+      count          INT NOT NULL DEFAULT 1,
+      text           TEXT,
+      created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
     );
-    CREATE INDEX IF NOT EXISTS idx_saved_owner ON saved_by_reply (owner_tg_id, saved_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_pending_owner ON pending_notice (owner_tg_id, created_at);
 
     -- ── Приглашения ──
     -- Условий доступа больше нет: архив открыт сразу, подписка на канал и
@@ -381,120 +373,14 @@ export async function saveMessage(m) {
   await q(
     `INSERT INTO message (chat_id, tg_msg_id, sender_tg_id, sender_name, text, media_type,
                           media_file_id, media_unique_id, repeat_of_at, orig_sent_at,
-                          owner_tg_id, sent_at, is_self_destruct, ttl_seconds, saved_before_destruct)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, to_timestamp($12), $13, $14, $15)
-     ON CONFLICT (chat_id, tg_msg_id, COALESCE(owner_tg_id, -1)) DO UPDATE SET
-       is_self_destruct = EXCLUDED.is_self_destruct,
-       ttl_seconds = EXCLUDED.ttl_seconds,
-       saved_before_destruct = EXCLUDED.saved_before_destruct,
-       media_file_id = COALESCE(EXCLUDED.media_file_id, message.media_file_id)`,
+                          owner_tg_id, sent_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, to_timestamp($12))
+     ON CONFLICT (chat_id, tg_msg_id, COALESCE(owner_tg_id, -1)) DO NOTHING`,
     [m.chatId, m.tgMsgId, m.senderTgId, m.senderName, m.text, m.mediaType,
      m.mediaFileId || null, m.mediaUniqueId || null, m.repeatOfAt || null,
      m.origSentAt ? new Date(m.origSentAt * 1000) : null,
-     m.ownerTgId ?? null, m.sentAt,
-     Boolean(m.isSelfDestruct || false),
-     m.ttlSeconds || null,
-     Boolean(m.savedBeforeDestruct || false)]
+     m.ownerTgId ?? null, m.sentAt]
   );
-}
-
-/**
- * Сохраняет самоуничтожающееся медиа с повышенным приоритетом
- * Использует тот же механизм, но с пометкой, что это срочное сохранение
- */
-export async function saveSelfDestructMedia(m) {
-  // Проверяем, существует ли уже такое сообщение
-  const existing = await q(
-    `SELECT id, media_file_id, local_file_path FROM message 
-     WHERE chat_id = $1 AND tg_msg_id = $2 AND owner_tg_id IS NOT DISTINCT FROM $3`,
-    [m.chatId, m.tgMsgId, m.ownerTgId ?? null]
-  );
-  
-  if (existing.rows.length > 0) {
-    // Если уже есть, обновляем метаданные
-    const result = await q(
-      `UPDATE message 
-       SET is_self_destruct = true, 
-           ttl_seconds = $1,
-           media_file_id = COALESCE($2, media_file_id),
-           saved_before_destruct = true
-       WHERE id = $3
-       RETURNING id`,
-      [m.ttlSeconds || null, m.mediaFileId || null, existing.rows[0].id]
-    );
-    return result.rows[0].id;
-  }
-  
-  // Сохраняем новое сообщение с пометкой self-destruct
-  const result = await q(
-    `INSERT INTO message (
-      chat_id, tg_msg_id, sender_tg_id, sender_name, text, 
-      media_type, media_file_id, media_unique_id,
-      is_self_destruct, ttl_seconds, saved_before_destruct,
-      owner_tg_id, sent_at, created_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, to_timestamp($13), now())
-    ON CONFLICT (chat_id, tg_msg_id, COALESCE(owner_tg_id, -1)) 
-    DO UPDATE SET 
-      is_self_destruct = EXCLUDED.is_self_destruct,
-      ttl_seconds = EXCLUDED.ttl_seconds,
-      saved_before_destruct = EXCLUDED.saved_before_destruct,
-      media_file_id = COALESCE(EXCLUDED.media_file_id, message.media_file_id)
-    RETURNING id`,
-    [
-      m.chatId, 
-      m.tgMsgId, 
-      m.senderTgId || null, 
-      m.senderName || null, 
-      m.text || null,
-      m.mediaType || null,
-      m.mediaFileId || null,
-      m.mediaUniqueId || null,
-      true, // is_self_destruct
-      m.ttlSeconds || null,
-      true, // saved_before_destruct
-      m.ownerTgId ?? null,
-      m.sentAt || Math.floor(Date.now() / 1000)
-    ]
-  );
-  
-  return result.rows[0].id;
-}
-
-/**
- * Обновляет путь к локально сохраненному файлу для самоуничтожающегося медиа
- */
-export async function updateLocalFilePath(messageId, filePath) {
-  await q(
-    `UPDATE message SET local_file_path = $1 WHERE id = $2`,
-    [filePath, messageId]
-  );
-}
-
-/**
- * Помечает самоуничтожающееся сообщение как уничтоженное (когда TTL истек)
- */
-export async function markDestructed(messageId) {
-  await q(
-    `UPDATE message SET destructed_at = now() WHERE id = $1`,
-    [messageId]
-  );
-}
-
-/**
- * Получает все самоуничтожающиеся медиа, которые еще не были сохранены локально
- */
-export async function getUnsavedSelfDestructMedia(limit = 100) {
-  const { rows } = await q(
-    `SELECT id, chat_id, tg_msg_id, media_file_id, media_type, owner_tg_id, ttl_seconds
-     FROM message 
-     WHERE is_self_destruct = true 
-       AND saved_before_destruct = true
-       AND local_file_path IS NULL
-       AND destructed_at IS NULL
-     LIMIT $1`,
-    [limit]
-  );
-  return rows;
 }
 
 // ─── Фейк-контроль ───
@@ -516,67 +402,104 @@ export async function firstSeenMedia(ownerTgId, mediaUniqueId) {
   return rows[0] ? { at: rows[0].sent_at, chat: rows[0].title } : null;
 }
 
-// ─── Сохранение по ответу ───
+// ─── Отложенные уведомления ───
 
-/**
- * Занять право сохранить сообщение. true — сохраняем, false — уже сохранено
- * (кто-то ответил на этот же файл раньше).
- *
- * Проверка и запись — одна атомарная вставка: два ответа, пришедшие в
- * соседние миллисекунды в разные экземпляры функции, дадут ровно одну копию.
- */
-export async function claimSavedByReply(ownerTgId, chatId, tgMsgId, mediaType) {
-  const { rowCount } = await q(
-    `INSERT INTO saved_by_reply (owner_tg_id, chat_id, tg_msg_id, media_type)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (owner_tg_id, chat_id, tg_msg_id) DO NOTHING`,
-    [ownerTgId, chatId, tgMsgId, mediaType || null]
-  );
-  return rowCount > 0;
-}
-
-/**
- * Снять отметку — копию доставить не удалось.
- * Без этого один сбой сети навсегда закрывал бы файл от повторной попытки.
- */
-export async function releaseSavedByReply(ownerTgId, chatId, tgMsgId) {
+/** Поставить событие в очередь. */
+export async function queueNotice(n) {
   await q(
-    `DELETE FROM saved_by_reply
-     WHERE owner_tg_id = $1 AND chat_id = $2 AND tg_msg_id = $3`,
-    [ownerTgId, chatId, tgMsgId]
+    `INSERT INTO pending_notice (owner_tg_id, target_chat_id, kind, chat_title, count, text)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [n.ownerTgId, n.targetChatId, n.kind, n.chatTitle || null,
+     Number(n.count) || 1, n.text || null]
   );
 }
 
 /**
- * Кому слать копию из группового чата: те, кто подключил этот чат.
- * Бизнес-привязки исключены — у личных чатов владелец известен точно,
- * и он приходит другим путём.
+ * Владельцы, у которых что-то лежит в очереди, вместе с их настройками.
+ * Решение «пора или нет» принимает чистая функция isDigestDue — здесь только
+ * данные для неё.
  *
- * Настройки отдаём этим же запросом: иначе на каждого получателя был бы
- * отдельный поход в базу внутри и без того короткого serverless-вызова.
+ * limit ограничивает объём работы за один вызов: и cron, и вебхук обязаны
+ * уложиться в лимит времени serverless-функции.
  */
-export async function saveTargetsForChat(chatId) {
+export async function pendingOwners(limit = 40) {
   const { rows } = await q(
-    `SELECT u.tg_id, u.save_on_reply, u.quiet_hours, u.quiet_from, u.quiet_to, u.tz_offset_min
-     FROM chat_link cl
-     JOIN app_user u ON u.id = cl.user_id
-     WHERE cl.chat_id = $1 AND NOT cl.via_business AND u.save_on_reply`,
-    [chatId]
+    `SELECT p.owner_tg_id, MIN(p.created_at) AS oldest_at, COUNT(*)::int AS n,
+            u.notify_mode, u.notify_deleted, u.notify_edited, u.notify_fake,
+            u.quiet_hours, u.quiet_from, u.quiet_to, u.tz_offset_min
+     FROM pending_notice p
+     LEFT JOIN app_user u ON u.tg_id = p.owner_tg_id
+     GROUP BY p.owner_tg_id, u.notify_mode, u.notify_deleted, u.notify_edited,
+              u.notify_fake, u.quiet_hours, u.quiet_from, u.quiet_to, u.tz_offset_min
+     ORDER BY oldest_at
+     LIMIT $1`,
+    [limit]
   );
   return rows.map((r) => ({
-    tgId: Number(r.tg_id),
-    quietHours: Boolean(r.quiet_hours),
-    quietFrom: Number(r.quiet_from),
-    quietTo: Number(r.quiet_to),
-    tzOffsetMin: Number(r.tz_offset_min),
+    tgId: Number(r.owner_tg_id),
+    oldestAt: r.oldest_at,
+    count: r.n,
+    settings: {
+      notifyMode: r.notify_mode || 'instant',
+      notifyDeleted: r.notify_deleted !== false,
+      notifyEdited: Boolean(r.notify_edited),
+      notifyFake: r.notify_fake !== false,
+      quietHours: Boolean(r.quiet_hours),
+      quietFrom: Number(r.quiet_from ?? 23),
+      quietTo: Number(r.quiet_to ?? 8),
+      tzOffsetMin: Number(r.tz_offset_min ?? 0),
+    },
   }));
+}
+
+/**
+ * Забрать события владельца из очереди.
+ *
+ * DELETE … RETURNING, а не SELECT с последующим удалением: cron и вебхук
+ * могут сработать одновременно, и только атомарный забор гарантирует, что
+ * сводку получит ровно один из них. Кто забрал — тот и отправляет.
+ */
+export async function claimNotices(ownerTgId) {
+  const { rows } = await q(
+    `DELETE FROM pending_notice WHERE owner_tg_id = $1
+     RETURNING target_chat_id, kind, chat_title, count, text, created_at`,
+    [ownerTgId]
+  );
+  return rows.map((r) => ({
+    targetChatId: Number(r.target_chat_id),
+    kind: r.kind,
+    chatTitle: r.chat_title,
+    count: Number(r.count) || 1,
+    text: r.text,
+    at: r.created_at,
+  }));
+}
+
+/** Вернуть события в очередь — отправить не удалось. */
+export async function requeueNotices(ownerTgId, items) {
+  for (const it of items || []) {
+    await q(
+      `INSERT INTO pending_notice (owner_tg_id, target_chat_id, kind, chat_title, count, text, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [ownerTgId, it.targetChatId, it.kind, it.chatTitle, it.count, it.text, it.at]
+    );
+  }
+}
+
+/** Сколько событий ждёт отправки — для экрана уведомлений. */
+export async function pendingCount(ownerTgId) {
+  const { rows } = await q(
+    'SELECT COUNT(*)::int AS n FROM pending_notice WHERE owner_tg_id = $1',
+    [ownerTgId]
+  );
+  return rows[0]?.n || 0;
 }
 
 // ─── Настройки пользователя ───
 
 export async function getUserSettings(tgId) {
   const { rows } = await q(
-    `SELECT notify_deleted, notify_edited, notify_fake, save_on_reply,
+    `SELECT notify_deleted, notify_edited, notify_fake, notify_mode,
             quiet_hours, quiet_from, quiet_to, tz_offset_min
      FROM app_user WHERE tg_id = $1`,
     [tgId]
@@ -586,7 +509,7 @@ export async function getUserSettings(tgId) {
     notifyDeleted: r ? Boolean(r.notify_deleted) : true,
     notifyEdited: r ? Boolean(r.notify_edited) : false,
     notifyFake: r ? Boolean(r.notify_fake) : true,
-    saveOnReply: r ? Boolean(r.save_on_reply) : true,
+    notifyMode: r?.notify_mode || 'instant',
     quietHours: r ? Boolean(r.quiet_hours) : false,
     quietFrom: r ? Number(r.quiet_from) : 23,
     quietTo: r ? Number(r.quiet_to) : 8,
@@ -596,36 +519,22 @@ export async function getUserSettings(tgId) {
 
 export async function setUserSettings(tgId, s) {
   await q(
-    `INSERT INTO app_user (tg_id, notify_deleted, notify_edited, notify_fake, save_on_reply,
+    `INSERT INTO app_user (tg_id, notify_deleted, notify_edited, notify_fake, notify_mode,
                            quiet_hours, quiet_from, quiet_to, tz_offset_min)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      ON CONFLICT (tg_id) DO UPDATE SET
        notify_deleted = EXCLUDED.notify_deleted,
        notify_edited = EXCLUDED.notify_edited,
        notify_fake = EXCLUDED.notify_fake,
-       save_on_reply = EXCLUDED.save_on_reply,
+       notify_mode = EXCLUDED.notify_mode,
        quiet_hours = EXCLUDED.quiet_hours,
        quiet_from = EXCLUDED.quiet_from,
        quiet_to = EXCLUDED.quiet_to,
        tz_offset_min = EXCLUDED.tz_offset_min`,
     [tgId, Boolean(s.notifyDeleted), Boolean(s.notifyEdited), Boolean(s.notifyFake),
-     s.saveOnReply !== false,
+     s.notifyMode || 'instant',
      Boolean(s.quietHours), Number(s.quietFrom ?? 23), Number(s.quietTo ?? 8),
      Number(s.tzOffsetMin ?? 0)]
-  );
-}
-
-/**
- * Заменяет media_file_id у уже сохранённого сообщения.
- * Нужно отдельно от saveMessage: тот пишет media_file_id через COALESCE
- * (не трогает, если уже что-то есть), а здесь ровно обратный случай —
- * старый TTL-file_id обречён, и его НАДО заменить свежим.
- */
-export async function replaceMediaFileId(chatId, tgMsgId, ownerTgId, fileId) {
-  await q(
-    `UPDATE message SET media_file_id = $4
-     WHERE chat_id = $1 AND tg_msg_id = $2 AND owner_tg_id IS NOT DISTINCT FROM $3`,
-    [chatId, tgMsgId, ownerTgId ?? null, fileId]
   );
 }
 
@@ -652,8 +561,8 @@ export async function eraseUserData(tgId) {
   // 1. Личный архив (message_revision уходит каскадом)
   const msgs = await q(`DELETE FROM message WHERE owner_tg_id = $1`, [tgId]);
 
-  // 1a. Отметки «сохранено по ответу»: это тоже след пользователя
-  await q(`DELETE FROM saved_by_reply WHERE owner_tg_id = $1`, [tgId]);
+  // 1a. Неотправленные уведомления — тоже след пользователя
+  await q('DELETE FROM pending_notice WHERE owner_tg_id = $1', [tgId]);
 
   // 2. Отвязка чатов
   const links = await q(`DELETE FROM chat_link WHERE user_id = $1`, [userId]);

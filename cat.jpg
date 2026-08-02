@@ -223,7 +223,24 @@ async function loadActivity() {
 async function loadSettings() {
   if (S.settings) return;
   try { S.settings = await api('/api/settings'); render(); }
-  catch { S.settings = { notifyDeleted: true, notifyEdited: false, notifyFake: true, saveOnReply: true, offline: true }; render(); }
+  catch { S.settings = { notifyDeleted: true, notifyEdited: false, notifyFake: true, notifyMode: 'instant', offline: true }; render(); }
+}
+
+// Выбор режима доставки. Отдельно от toggleSetting: там переключение
+// булева значения, здесь — выбор одного из четырёх.
+async function setMode(mode) {
+  if (!S.settings || S.settings.notifyMode === mode) return;
+  S.settings.notifyMode = mode;
+  render();
+  if (tg?.HapticFeedback) tg.HapticFeedback.selectionChanged();
+  try {
+    S.settings = await apiPost('/api/settings', {
+      ...S.settings,
+      tzOffsetMin: -new Date().getTimezoneOffset(),
+    });
+    render();
+  }
+  catch { /* оставляем локально, сохранится при следующем изменении */ }
 }
 
 async function toggleSetting(key) {
@@ -1027,6 +1044,23 @@ function Privacy() {
 
     ${communityCard()}
 
+    <div class="sec">Документы</div>
+    <div class="card" style="margin:0 16px;overflow:hidden">
+      <a class="row" href="/privacy.html" target="_blank" rel="noopener">
+        <span class="chip" style="width:32px;height:32px;border-radius:11px;background:var(--g-purple)">${sv('doc',15,'#fff',2.3)}</span>
+        <span class="row-main"><span class="row-title">Политика конфиденциальности</span>
+        <span class="row-sub">Какие данные, где хранятся и как их удалить</span></span>
+        ${sv('arrow',13,'var(--txt-lo)')}
+      </a>
+      <div class="div"></div>
+      <a class="row" href="/terms.html" target="_blank" rel="noopener">
+        <span class="chip" style="width:32px;height:32px;border-radius:11px;background:var(--g-orange)">${sv('shield',15,'#fff',2.3)}</span>
+        <span class="row-main"><span class="row-title">Пользовательское соглашение</span>
+        <span class="row-sub">Что можно, что запрещено и за что отвечаете вы</span></span>
+        ${sv('arrow',13,'var(--txt-lo)')}
+      </a>
+    </div>
+
     <div class="note" style="margin:18px 16px 0;text-align:center">
       Вопросы о данных — в поддержку @Business_Senior
     </div>`;
@@ -1045,27 +1079,41 @@ function Settings() {
       <span class="toggle ${on ? 'on' : ''}"></span>
     </button>`;
 
+  // Режим доставки: одна выбранная строка, остальные — варианты.
+  const mode = s.notifyMode || 'instant';
+  const modes = [
+    ['instant','Сразу','Каждое событие — отдельным сообщением'],
+    ['hourly','Раз в час','Накопленное за час придёт одной сводкой'],
+    ['daily','Раз в день','Одна сводка утром, в 9:00 по вашему времени'],
+    ['silent','Только в приложении','Бот не пишет вообще — события смотрите здесь'],
+  ];
+  const modeRow = ([key, title, sub]) => `
+    <button class="row" data-mode="${key}" style="width:100%;text-align:left">
+      <span class="chip" style="width:26px;height:26px;border-radius:9px;
+        background:${mode === key ? 'var(--g-green)' : 'var(--surf-hi)'}">
+        ${mode === key ? sv('check',13,'#04231A',3) : ''}</span>
+      <span class="row-main">
+        <span class="row-title">${title}</span>
+        <span class="row-sub">${sub}</span>
+      </span>
+    </button>`;
+
   return `
-    <div class="sec">Уведомления от бота</div>
+    <div class="sec">Как доставлять</div>
     <div class="card" style="margin:0 16px;overflow:hidden">
+      ${modes.map((m,i) => `${i ? '<div class="div"></div>' : ''}${modeRow(m)}`).join('')}
+    </div>
+    ${s.pending ? `<div class="note" style="margin:10px 16px 0;color:var(--gold)">
+      ${s.pending} ${s.pending === 1 ? 'событие ждёт' : s.pending < 5 ? 'события ждут' : 'событий ждут'}
+      ближайшей сводки.</div>` : ''}
+
+    <div class="sec">О чём сообщать</div>
+    <div class="card" style="margin:0 16px;overflow:hidden${mode === 'silent' ? ';opacity:.5' : ''}">
       ${row('notifyDeleted','Удаление сообщений','Бот напишет в личку, когда в подключённом чате удалят сообщение', s.notifyDeleted)}
       <div class="div"></div>
       ${row('notifyEdited','Изменение сообщений','Сообщение в личку при редактировании — версия «до» уже в архиве', s.notifyEdited)}
       <div class="div"></div>
       ${row('notifyFake','Фейк-контроль медиа','Предупредить, если фото или кружок уже приходили раньше — то есть запись не новая', s.notifyFake)}
-    </div>
-
-    <div class="sec">Сохранение по ответу</div>
-    <div class="card" style="margin:0 16px;overflow:hidden">
-      ${row('saveOnReply','Ответ = сохранить','Ответьте на файл в подключённом чате — хоть точкой — и его копия придёт вам в личку с ботом', s.saveOnReply !== false)}
-    </div>
-    <div class="note" style="margin:10px 16px 0">
-      Работает для фото, видео, голосовых, кружков, GIF и документов.
-      Копия приходит один раз, сколько бы ответов ни было.
-    </div>
-    <div class="note" style="margin:10px 16px 0">
-      Работает для личных чатов, подключённых через Telegram Business —
-      только там Telegram присылает событие удаления в момент удаления.
     </div>
 
     <div class="sec">Не беспокоить</div>
@@ -1076,8 +1124,8 @@ function Settings() {
     </div>
     <div class="note" style="margin:10px 16px 0">
       Время считается по вашему часовому поясу${quietTzLabel()}.
-      События всё равно сохраняются в архив — утром увидите их в приложении,
-      просто без ночных сообщений.
+      Ночные события не теряются: они копятся и приходят одной сводкой,
+      когда тишина закончится.
     </div>
 
     <div class="sec">Данные</div>
@@ -1206,7 +1254,7 @@ function render() {
 
 /* ── события ── */
 document.addEventListener('click', (e) => {
-  const el = e.target.closest('[data-tab],[data-open],[data-ctab],[data-reload],[data-addbot],[data-export],[data-toggle],[data-clear-search],[data-erase],[data-tglink],[data-pin],[data-clear-msgsearch]');
+  const el = e.target.closest('[data-tab],[data-open],[data-ctab],[data-reload],[data-addbot],[data-export],[data-toggle],[data-clear-search],[data-erase],[data-tglink],[data-pin],[data-clear-msgsearch],[data-mode]');
   if (!el) return;
   if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
 
@@ -1224,6 +1272,7 @@ document.addEventListener('click', (e) => {
   if (el.dataset.pin) { togglePin(Number(el.dataset.pin)); return; }
   if (el.dataset.clearMsgsearch !== undefined) { S.msgSearch = ''; loadMessages(); return; }
   if (el.dataset.export) { downloadChat(el.dataset.export); return; }
+  if (el.dataset.mode) { setMode(el.dataset.mode); return; }
   if (el.dataset.toggle) { toggleSetting(el.dataset.toggle); return; }
   if (el.dataset.clearSearch !== undefined) { S.chatSearch = ''; render(); return; }
   if (el.dataset.reload !== undefined) { S.events = null; S.settings = null; S.admin = null; loadAll(); return; }

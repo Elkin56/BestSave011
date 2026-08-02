@@ -4,7 +4,10 @@
 // GET — текущее состояние, POST — сохранить.
 
 import { requireAuth } from '../auth.js';
-import { ensureSchema, getUserSettings, setUserSettings, upsertUser } from '../db.js';
+import {
+  ensureSchema, getUserSettings, setUserSettings, upsertUser, pendingCount,
+} from '../db.js';
+import { normalizeMode } from '../digest.js';
 
 export default async function handler(req, res) {
   if (!requireAuth(req, res)) return;
@@ -14,7 +17,12 @@ export default async function handler(req, res) {
     const tgId = req.tgUser.id;
 
     if (req.method === 'GET') {
-      return res.status(200).json(await getUserSettings(tgId));
+      // pending — сколько событий ждёт сводки. Интерфейс показывает это
+      // рядом с режимом, иначе «Раз в день» выглядит как «бот сломался».
+      const [s, pending] = await Promise.all([
+        getUserSettings(tgId), pendingCount(tgId),
+      ]);
+      return res.status(200).json({ ...s, pending });
     }
 
     if (req.method === 'POST') {
@@ -37,14 +45,17 @@ export default async function handler(req, res) {
         notifyDeleted: body.notifyDeleted !== false,
         notifyEdited: body.notifyEdited === true,
         notifyFake: body.notifyFake !== false,
-        // По умолчанию включено: жест «ответил — сохранилось» и есть продукт.
-        saveOnReply: body.saveOnReply !== false,
+        // Режим приводим к известному: с клиента может прийти что угодно.
+        notifyMode: normalizeMode(body.notifyMode),
         quietHours: body.quietHours === true,
         quietFrom: hour(body.quietFrom, 23),
         quietTo: hour(body.quietTo, 8),
         tzOffsetMin: tzSafe,
       });
-      return res.status(200).json(await getUserSettings(tgId));
+      return res.status(200).json({
+        ...(await getUserSettings(tgId)),
+        pending: await pendingCount(tgId),
+      });
     }
 
     return res.status(405).json({ error: 'method not allowed' });

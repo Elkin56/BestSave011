@@ -1,0 +1,132 @@
+/* public/legal.css
+   Оформление правовых страниц. Отдельным файлом, а не копией в каждой:
+   документов два, и расходиться они не должны. */
+
+:root {
+  --bg-deep: #0C0A1C;
+  --bg: #120F26;
+  --surf: #1B1636;
+  --line: rgba(255, 255, 255, .09);
+  --txt: #F4F1FF;
+  --txt-lo: #A99FD0;
+  --txt-dim: #7E76A8;
+  --green: #34D399;
+  --gold: #FBBF24;
+  --red: #FB7185;
+  --violet: #A855F7;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  padding: 0 0 64px;
+  background: var(--bg-deep);
+  color: var(--txt);
+  font-family: 'Manrope', system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: 720px; margin: 0 auto; padding: 0 20px; }
+
+header {
+  background: linear-gradient(170deg, #311B5E 0%, #24134B 45%, var(--bg) 100%);
+  border-bottom: 1px solid var(--line);
+  padding: 34px 0 30px;
+  margin-bottom: 30px;
+}
+
+header .wrap { display: block; }
+
+.brand {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-family: 'Nunito', sans-serif; font-weight: 900;
+  font-size: 15px; letter-spacing: -.2px; color: var(--txt-lo);
+  margin-bottom: 16px;
+}
+
+.brand span {
+  width: 26px; height: 26px; border-radius: 9px;
+  background: linear-gradient(135deg, #7C3AED, #DB2777);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 13px; color: #fff;
+}
+
+h1 {
+  font-family: 'Nunito', sans-serif; font-weight: 900;
+  font-size: 27px; line-height: 1.25; letter-spacing: -.6px;
+  margin: 0 0 10px;
+}
+
+.meta { font-size: 13px; color: var(--txt-dim); margin: 0; }
+
+h2 {
+  font-family: 'Nunito', sans-serif; font-weight: 900;
+  font-size: 18px; letter-spacing: -.3px;
+  margin: 38px 0 12px; padding-top: 22px;
+  border-top: 1px solid var(--line);
+}
+
+h2:first-of-type { border-top: none; padding-top: 0; margin-top: 0; }
+
+h3 {
+  font-family: 'Nunito', sans-serif; font-weight: 800;
+  font-size: 15px; margin: 24px 0 8px;
+}
+
+p, li { color: var(--txt-lo); }
+p { margin: 0 0 13px; }
+ul, ol { margin: 0 0 13px; padding-left: 22px; }
+li { margin-bottom: 7px; }
+strong, b { color: var(--txt); font-weight: 700; }
+a { color: var(--violet); text-decoration: none; border-bottom: 1px solid rgba(168, 85, 247, .35); }
+a:hover { border-bottom-color: var(--violet); }
+
+.card {
+  background: var(--surf);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 17px 19px;
+  margin: 0 0 16px;
+}
+
+.card p:last-child, .card ul:last-child, .card ol:last-child { margin-bottom: 0; }
+
+.card.warn { border-color: rgba(251, 191, 36, .35); background: rgba(251, 191, 36, .05); }
+.card.stop { border-color: rgba(251, 113, 133, .35); background: rgba(251, 113, 133, .05); }
+.card.ok { border-color: rgba(52, 211, 153, .3); background: rgba(52, 211, 153, .05); }
+
+.tag {
+  display: inline-block; font-size: 11px; font-weight: 800;
+  letter-spacing: .5px; text-transform: uppercase;
+  padding: 3px 9px; border-radius: 7px; margin-bottom: 10px;
+}
+.tag.warn { background: rgba(251, 191, 36, .16); color: var(--gold); }
+.tag.stop { background: rgba(251, 113, 133, .16); color: var(--red); }
+.tag.ok { background: rgba(52, 211, 153, .16); color: var(--green); }
+
+.fill {
+  color: var(--gold); border-bottom: 1px dashed rgba(251, 191, 36, .5);
+  font-weight: 600;
+}
+
+.toc { font-size: 14px; }
+.toc ol { padding-left: 20px; }
+.toc li { margin-bottom: 4px; }
+
+footer {
+  margin-top: 44px; padding-top: 22px;
+  border-top: 1px solid var(--line);
+  font-size: 13px; color: var(--txt-dim);
+}
+
+footer a { margin-right: 16px; }
+
+@media (max-width: 520px) {
+  h1 { font-size: 23px; }
+  body { font-size: 14.5px; }
+}
