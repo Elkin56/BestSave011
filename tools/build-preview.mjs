@@ -19,6 +19,18 @@ let app = readFileSync(join(ROOT, 'public/app.js'), 'utf8');
 const catB64 = readFileSync(join(ROOT, 'public/cat.jpg')).toString('base64');
 const CAT = `data:image/jpeg;base64,${catB64}`;
 
+// Правовые страницы — отдельные файлы, которых в автономном превью нет.
+// Вкладываем их целиком (со встроенным legal.css) и открываем через Blob:
+// иначе ссылки в разделе «Конфиденциальность» вели бы в никуда.
+const legalCss = readFileSync(join(ROOT, 'public/legal.css'), 'utf8');
+const inlineDoc = (file) =>
+  readFileSync(join(ROOT, 'public', file), 'utf8')
+    .replace('<link rel="stylesheet" href="/legal.css">', `<style>${legalCss}</style>`);
+const DOCS = {
+  '/privacy.html': inlineDoc('privacy.html'),
+  '/terms.html': inlineDoc('terms.html'),
+};
+
 // Карточки «Событий» собирает серверный модуль аналитики. Чтобы превью
 // показывало их настоящую вёрстку, а не выдуманную, прогоняем реальный
 // генератор здесь и вкладываем готовый результат.
@@ -104,6 +116,10 @@ const PREVIEW_MSGS = [
     sentAt:'2026-07-23T08:15:00Z' },
 ];
 
+// Режим доставки в превью меняется прямо в интерфейсе: POST его запоминает,
+// GET отдаёт обратно — иначе выбор бы не «прилипал».
+let PREVIEW_MODE = 'hourly';
+
 const MOCK = {
   async get(path) {
     await new Promise((r) => setTimeout(r, 120)); // лёгкая задержка: видно спиннеры
@@ -149,8 +165,6 @@ const MOCK = {
       windowDays:30,
     };
 
-    if (route === 'gate') return PREVIEW_GATE();
-
     if (route === 'events') return { cards: PREVIEW_EVENT_CARDS, totalMessages: 1469 };
 
     if (route === 'me') return {
@@ -164,6 +178,10 @@ const MOCK = {
 
     if (route === 'settings') return {
       notifyDeleted:true, notifyEdited:false, notifyFake:true,
+      notifyMode: PREVIEW_MODE,
+      // Сколько событий ждёт сводки — показывается под выбором режима.
+      // В мгновенном режиме очереди не бывает, поэтому ноль.
+      pending: PREVIEW_MODE === 'instant' ? 0 : 4,
       quietHours:true, quietFrom:23, quietTo:8, tzOffsetMin:240,
     };
 
@@ -198,7 +216,10 @@ const MOCK = {
 
   async post(path, body) {
     await new Promise((r) => setTimeout(r, 80));
-    if (path.includes('settings')) return { ...body };
+    if (path.includes('settings')) {
+      if (body?.notifyMode) PREVIEW_MODE = body.notifyMode;
+      return { ...body, pending: PREVIEW_MODE === 'instant' ? 0 : 4 };
+    }
     if (path.includes('pin')) return { pinned: body.pinned !== false };
     if (path.includes('erase')) return { ok:true, messages:1469, chats:7, connections:1 };
     return { ok:true };
@@ -227,28 +248,16 @@ const MOCK = {
   },
 };
 
-// Состояние гейта в превью переключается кнопками внизу: 0 — ничего не
-// выполнено, 1 — подписка есть и один друг, 2 — доступ открыт.
-window.PREVIEW_GATE_STEP = 2;
-function PREVIEW_GATE() {
-  const step = window.PREVIEW_GATE_STEP;
-  const link = 'https://t.me/bestsaves_bot?start=ref901';
-  return {
-    passed: step === 2,
-    channel: {
-      title: 'BestSave Community',
-      url: 'https://t.me/bestsavee',
-      subscribed: step >= 1,
-    },
-    invites: {
-      count: step === 0 ? 0 : step === 1 ? 1 : 3,
-      need: 3,
-      left: step === 0 ? 3 : step === 1 ? 2 : 0,
-      link,
-      shareUrl: 'https://t.me/share/url?url=' + encodeURIComponent(link),
-    },
-  };
-}
+// Ссылки на документы: в превью нет сервера, поэтому отдаём их из памяти.
+const PREVIEW_DOCS = __DOCS__;
+document.addEventListener('click', (e) => {
+  const a = e.target.closest('a[href$=".html"]');
+  if (!a) return;
+  const doc = PREVIEW_DOCS[new URL(a.href, location.origin).pathname];
+  if (!doc) return;
+  e.preventDefault();
+  window.open(URL.createObjectURL(new Blob([doc], { type: 'text/html' })), '_blank');
+}, true);
 
 // Панель переключения экранов — только в превью, в приложении её нет.
 document.addEventListener('DOMContentLoaded', () => {
@@ -257,8 +266,8 @@ document.addEventListener('DOMContentLoaded', () => {
   bar.innerHTML = '<span>превью:</span>' + [
     ['home','Главная'], ['chats','Чаты'], ['chatview','Внутри чата'],
     ['events','События'], ['ai','AI'], ['profile','Профиль'],
+    ['notifications','События (лента)'],
     ['settings','Настройки'], ['privacy','Политика'], ['admin','Админка'],
-    ['gate0','Условия 0/3'], ['gate1','Условия 1/3'],
   ].map(([k,l]) => \`<button data-preview="\${k}">\${l}</button>\`).join('');
   document.body.appendChild(bar);
 
@@ -266,12 +275,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const b = e.target.closest('[data-preview]');
     if (!b) return;
     const to = b.dataset.preview;
-    if (to === 'gate0' || to === 'gate1') {
-      window.PREVIEW_GATE_STEP = to === 'gate0' ? 0 : 1;
-      S.gate = null; S.error = null; loadAll();
-      window.scrollTo({ top:0 });
-      return;
-    }
     if (to === 'chatview') {
       S.chat = PREVIEW_CHATS[2]; S.chatTab = 'deleted'; S.msgSearch = '';
       S.tab = 'chatview'; loadMessages();
@@ -318,8 +321,13 @@ const PREVIEW_CSS = `
 let out = html;
 out = out.replace('</style>', () => PREVIEW_CSS + '\n</style>');
 out = out.replace('<script src="https://telegram.org/js/telegram-web-app.js"></script>', () => '');
+// JSON.stringify + экранирование '</': иначе закрывающий тег внутри строки
+// оборвал бы сам <script>, в который всё это вкладывается.
+const docsLiteral = JSON.stringify(DOCS).replaceAll('</', '<\\/');
+const mock = MOCK.replace('__DOCS__', () => docsLiteral);
+
 out = out.replace('<script src="/app.js"></script>',
-  () => '<script>\n' + MOCK + '\n' + app + '\n' + BOOT + '\n</script>');
+  () => '<script>\n' + mock + '\n' + app + '\n' + BOOT + '\n</script>');
 
 writeFileSync(OUT, out);
 console.log('превью собрано:', OUT, `(${(out.length / 1024).toFixed(0)} КБ)`);

@@ -12,7 +12,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isDigestDue, shouldQueue, noticeEnabled, buildDigest,
-  normalizeMode, localHour, DAILY_HOUR, MODES,
+  normalizeMode, localHour, lastDailyMoment, DAILY_HOUR, MODES,
 } from '../lib/digest.js';
 
 const at = (iso) => new Date(iso);
@@ -40,20 +40,44 @@ describe('isDigestDue', () => {
     assert.equal(isDigestDue(s, ago(NOON, 1.2), NOON), true);
   });
 
-  test('дневной срабатывает только в свой час', () => {
+  test('дневной отдаёт накопленное до девяти утра', () => {
     const s = { ...base, notifyMode: 'daily' };
     const nine = at('2026-07-26T09:00:00Z');
-    const ten = at('2026-07-26T10:00:00Z');
-    assert.equal(isDigestDue(s, ago(nine, 5), nine), true);
-    assert.equal(isDigestDue(s, ago(ten, 5), ten), false);
+    assert.equal(isDigestDue(s, ago(nine, 5), nine), true, 'событие с 4 утра — пора');
   });
 
-  test('дневной считает час по поясу пользователя', () => {
+  test('дневной не ждёт ровно девяти — иначе сводка пропала бы до завтра', () => {
+    // Cron на бесплатном тарифе Vercel запускается раз в сутки, а попутный
+    // сброс — когда придёт апдейт. Точное совпадение часа тут недостижимо.
+    const s = { ...base, notifyMode: 'daily' };
+    const two = at('2026-07-26T14:00:00Z');   // 14:00, девять давно прошли
+    assert.equal(isDigestDue(s, at('2026-07-26T07:00:00Z'), two), true,
+      'событие до девяти — отдаём при первой возможности');
+    assert.equal(isDigestDue(s, at('2026-07-26T11:00:00Z'), two), false,
+      'событие после девяти — ждёт завтрашней сводки');
+  });
+
+  test('дневной до наступления срока молчит', () => {
+    const s = { ...base, notifyMode: 'daily' };
+    const early = at('2026-07-26T05:00:00Z');           // ещё нет девяти
+    assert.equal(isDigestDue(s, at('2026-07-26T04:00:00Z'), early), false);
+  });
+
+  test('дневной считает время по поясу пользователя', () => {
     // Самара (+240): 09:00 местного = 05:00 UTC
     const s = { ...base, notifyMode: 'daily', tzOffsetMin: 240 };
-    const utc5 = at('2026-07-26T05:00:00Z');
-    assert.equal(localHour(240, utc5), DAILY_HOUR);
-    assert.equal(isDigestDue(s, ago(utc5, 3), utc5), true);
+    const utc6 = at('2026-07-26T06:00:00Z');            // 10:00 в Самаре
+    assert.equal(localHour(240, at('2026-07-26T05:00:00Z')), DAILY_HOUR);
+    assert.equal(isDigestDue(s, at('2026-07-26T03:00:00Z'), utc6), true);
+    assert.equal(isDigestDue(s, at('2026-07-26T05:30:00Z'), utc6), false,
+      'уже после местных девяти — в завтрашнюю сводку');
+  });
+
+  test('lastDailyMoment возвращает вчерашний срок, если сегодняшний не наступил', () => {
+    const before = lastDailyMoment(0, at('2026-07-26T05:00:00Z'));
+    assert.equal(before.toISOString(), '2026-07-25T09:00:00.000Z');
+    const after = lastDailyMoment(0, at('2026-07-26T12:00:00Z'));
+    assert.equal(after.toISOString(), '2026-07-26T09:00:00.000Z');
   });
 
   test('молчаливый режим не отправляет никогда', () => {
