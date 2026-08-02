@@ -1272,7 +1272,6 @@ document.addEventListener('click', (e) => {
   if (el.dataset.pin) { togglePin(Number(el.dataset.pin)); return; }
   if (el.dataset.clearMsgsearch !== undefined) { S.msgSearch = ''; loadMessages(); return; }
   if (el.dataset.export) { downloadChat(el.dataset.export); return; }
-  if (el.dataset.mode) { setMode(el.dataset.mode); return; }
   if (el.dataset.toggle) { toggleSetting(el.dataset.toggle); return; }
   if (el.dataset.clearSearch !== undefined) { S.chatSearch = ''; render(); return; }
   if (el.dataset.reload !== undefined) { S.events = null; S.settings = null; S.admin = null; loadAll(); return; }
