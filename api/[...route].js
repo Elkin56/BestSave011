@@ -17,6 +17,7 @@
 
 import activity from '../lib/handlers/activity.js';
 import admin from '../lib/handlers/admin.js';
+import adminErase from '../lib/handlers/admin-erase.js';
 import avatar from '../lib/handlers/avatar.js';
 import botInfo from '../lib/handlers/bot-info.js';
 import chats from '../lib/handlers/chats.js';
@@ -34,11 +35,13 @@ import pin from '../lib/handlers/pin.js';
 import settings from '../lib/handlers/settings.js';
 import setup from '../lib/handlers/setup.js';
 import stats from '../lib/handlers/stats.js';
+import storage from '../lib/handlers/storage.js';
 // Ключ — первый сегмент пути после /api/. Ключи должны совпадать
 // с прежними именами файлов, чтобы фронтенд не менять.
 const routes = {
   activity,
   admin,
+  'admin-erase': adminErase,
   avatar,
   'bot-info': botInfo,
   chats,
@@ -56,6 +59,7 @@ const routes = {
   settings,
   setup,
   stats,
+  storage,
 };
 
 export default async function handler(req, res) {

@@ -19,13 +19,29 @@ const app = readFileSync(join(ROOT, 'public/app.js'), 'utf8');
 const camel = (s) => s.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
 
 describe('проводка интерфейса', () => {
+  // Оформительские: разметка их использует, обработчик — нет.
+  const DECOR = new Set(['stagger', 'count']);
+
+  // Модификаторы: читаются с элемента, который поймал клик по ДРУГОМУ
+  // атрибуту (например, data-unlink на кнопке с data-erasechat).
+  // Требовать для них отдельной ветки бессмысленно, но и молча пропускать
+  // нельзя: проверяем, что каждый действительно читается в коде.
+  const MODIFIERS = new Set(['unlink', 'amode', 'on']);
+
   const used = [...new Set([...app.matchAll(/data-([a-z-]+)\s*=/g)].map((m) => m[1]))]
-    .filter((a) => a !== 'stagger' && a !== 'count');   // чисто оформительские
+    .filter((a) => !DECOR.has(a));
+
+  test('каждый модификатор где-то читается', () => {
+    for (const a of used.filter((x) => MODIFIERS.has(x))) {
+      assert.match(app, new RegExp(`dataset\\.${camel(a)}\\b`),
+        `data-${a} размечен, но нигде не читается`);
+    }
+  });
 
   test('каждый data-атрибут разметки перечислен в делегате кликов', () => {
     const sel = /const el = e\.target\.closest\('([^']+)'\)/.exec(app);
     assert.ok(sel, 'делегат кликов не найден');
-    for (const a of used) {
+    for (const a of used.filter((x) => !MODIFIERS.has(x))) {
       assert.ok(sel[1].includes(`[data-${a}]`), `data-${a} не ловится делегатом`);
     }
   });

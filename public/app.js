@@ -38,7 +38,10 @@ const S = {
   me: null,
   resourceToken: null,
   settings: null,         // { notifyDeleted, notifyEdited, notifyFake }
-  admin: null,            // метрики владельца (только если isAdmin)
+  admin: null,
+  storage: null,        // обслуживание хранилища (только владелец)
+  storageBusy: false,
+  adminOpen: null,      // id пользователя с раскрытыми действиями
   isAdmin: false,
   aiTab: 0,
 };
@@ -620,7 +623,19 @@ function ChatView() {
     ${searchBox}
     <div style="margin-top:14px">${body()}</div>
     ${!S.chatLoading && S.chatTab !== 'activity' ? `<button class="btn-ghost" data-export="${esc(S.chat.chatId)}" style="margin:6px 16px 0;width:calc(100% - 32px)">
-      ${sv('download',15,'var(--green)')} Скачать чат файлом (сообщения + фото + голосовые)</button>` : ''}`;
+      ${sv('download',15,'var(--green)')} Скачать чат файлом (сообщения + фото + голосовые)</button>
+
+    <div class="sec" style="margin-top:22px">Очистка</div>
+    <div class="note" style="margin:0 16px 10px">
+      Удаляется только ваша копия. У других участников чата свои архивы —
+      их это не затронет. Перед очисткой имеет смысл скачать чат файлом.
+    </div>
+    <button class="btn-ghost" data-erasechat="${esc(S.chat.chatId)}"
+      style="margin:0 16px;width:calc(100% - 32px)">
+      ${sv('trash',15,'var(--gold)')} Очистить архив — чат остаётся подключённым</button>
+    <button class="btn-danger" data-erasechat="${esc(S.chat.chatId)}" data-unlink="1"
+      style="margin:10px 16px 0;width:calc(100% - 32px)">
+      ${sv('trash',15,'#fff',2.4)} Удалить чат из архива и отключить</button>` : ''}`;
 }
 
 const mediaLabel = (t) => ({
@@ -795,35 +810,163 @@ function Profile() {
 
 // Удаление всех данных. Спрашиваем подтверждение и показываем, что именно
 // удалилось, — чтобы результат был виден, а не «готово».
-async function eraseAll() {
-  const ok = await new Promise((resolve) => {
+// Подтверждение разрушительного действия. Вынесено из eraseAll: теперь мест
+// удаления несколько, и диалог у них обязан быть одинаково настойчивым.
+function confirmDanger(title, message, okText = 'Удалить') {
+  return new Promise((resolve) => {
     if (tg?.showPopup) {
       tg.showPopup({
-        title: 'Удалить все данные?',
-        message: 'Архив, привязки чатов и настройки будут стёрты без возможности восстановления.',
+        title, message,
         buttons: [
-          { id: 'yes', type: 'destructive', text: 'Удалить' },
+          { id: 'yes', type: 'destructive', text: okText },
           { id: 'no', type: 'cancel' },
         ],
       }, (id) => resolve(id === 'yes'));
     } else {
-      resolve(window.confirm('Удалить все данные? Восстановить будет нельзя.'));
+      resolve(window.confirm(`${title}\n\n${message}`));
     }
   });
+}
+
+const say = (msg) => { if (tg?.showAlert) tg.showAlert(msg); else alert(msg); };
+
+// Очистка архива одного чата. Два исхода на выбор: стереть переписку и
+// продолжать сохранять либо стереть и отключиться от чата совсем.
+async function eraseChat(chatId, title, unlink) {
+  const ok = await confirmDanger(
+    unlink ? 'Удалить чат из архива?' : 'Очистить архив чата?',
+    unlink
+      ? `Переписка чата «${title}» будет стёрта, а сам чат отключён — ` +
+        'новые сообщения сохраняться не будут. Восстановить нельзя.'
+      : `Сохранённые сообщения чата «${title}» будут стёрты без возможности ` +
+        'восстановления. Чат останется подключённым и начнёт наполняться заново.',
+    unlink ? 'Удалить' : 'Очистить'
+  );
+  if (!ok) return;
+
+  try {
+    const r = await apiPost('/api/erase', { confirm: 'УДАЛИТЬ', chatId, unlink });
+    say(`Удалено сообщений: ${fmt(r.messages)}.`);
+    S.chats = []; S.stats = null; S.events = null;
+    S.tab = 'chats'; S.chat = null; S.messages = null;
+    await loadAll();
+  } catch (e) {
+    say('Не удалось очистить: ' + e.message);
+  }
+}
+
+async function eraseAll() {
+  const ok = await confirmDanger('Удалить все данные?',
+    'Архив, привязки чатов и настройки будут стёрты без возможности восстановления.');
   if (!ok) return;
 
   try {
     const r = await apiPost('/api/erase', { confirm: 'УДАЛИТЬ' });
-    const msg = `Удалено: ${fmt(r.messages)} сообщений, ${fmt(r.chats)} чатов.`;
-    if (tg?.showAlert) tg.showAlert(msg); else alert(msg);
+    say(`Удалено: ${fmt(r.messages)} сообщений, ${fmt(r.chats)} чатов.`);
     // Состояние обнуляем и перезагружаем: архив теперь пуст
     S.stats = null; S.chats = []; S.me = null; S.events = null; S.settings = null;
     S.tab = 'home';
     await loadAll();
   } catch (e) {
-    const msg = 'Не удалось удалить: ' + e.message;
-    if (tg?.showAlert) tg.showAlert(msg); else alert(msg);
+    say('Не удалось удалить: ' + e.message);
   }
+}
+
+// Очистка данных пользователя владельцем продукта.
+// Человеку об этом сообщит бот — молча стирать чужой архив нельзя.
+async function adminErase(tgId, mode) {
+  const full = mode === 'full';
+  const ok = await confirmDanger(
+    full ? 'Удалить пользователя целиком?' : 'Очистить архив пользователя?',
+    (full
+      ? `Учётная запись ${tgId}, весь архив, привязки чатов и подключения будут стёрты.`
+      : `Сохранённые сообщения пользователя ${tgId} будут стёрты. Учётная запись ` +
+        'и подключения останутся, архив начнёт наполняться заново.') +
+    '\n\nДействие необратимо, попадёт в журнал, и бот сообщит об этом человеку.',
+    full ? 'Удалить всё' : 'Очистить'
+  );
+  if (!ok) return;
+
+  try {
+    const r = await apiPost('/api/admin-erase', { confirm: 'УДАЛИТЬ', tgId, mode });
+    say(`Готово. Удалено сообщений: ${fmt(r.messages)}.`);
+    S.admin = null; S.storage = null;
+    loadAdmin();
+  } catch (e) {
+    say('Не удалось: ' + e.message);
+  }
+}
+
+async function loadStorage() {
+  if (S.storageBusy) return;
+  S.storageBusy = true;
+  try { S.storage = await api('/api/storage'); }
+  catch (e) { S.storage = { error: e.message }; }
+  S.storageBusy = false;
+  render();
+}
+
+// Уборка мусора. Категории выбираются галочками; удаляется только то,
+// что уже никому не принадлежит.
+async function runSweep() {
+  const keys = [...document.querySelectorAll('[data-sweepkey]')]
+    .filter((b) => b.dataset.on === '1')
+    .map((b) => b.dataset.sweepkey);
+  if (!keys.length) { say('Ничего не выбрано.'); return; }
+
+  const ok = await confirmDanger('Выполнить уборку?',
+    `Будет удалено ${keys.length} ${keys.length === 1 ? 'категория' : 'категории'} ` +
+    'служебных данных. Архивы пользователей не затрагиваются.', 'Очистить');
+  if (!ok) return;
+
+  try {
+    const r = await apiPost('/api/storage', { confirm: 'ОЧИСТИТЬ', keys });
+    say(`Удалено строк: ${fmt(r.total)}.`);
+    S.storage = null; loadStorage();
+  } catch (e) {
+    say('Не удалось: ' + e.message);
+  }
+}
+
+// Обслуживание хранилища: сперва показать, что найдено, и только потом
+// удалять. Категории — исключительно мусор: данные, у которых уже нет
+// владельца. Архивы живых пользователей отсюда не трогаются.
+function storageBlock() {
+  const st = S.storage;
+  if (!st) { loadStorage(); return `<div class="al-block"><h4>Хранилище</h4>
+    <div class="al-note">Считаю…</div></div>`; }
+  if (st.error) return `<div class="al-block"><h4>Хранилище</h4>
+    <div class="al-note">Не удалось: ${esc(st.error)}</div></div>`;
+
+  const junk = (st.items || []).reduce((n, i) => n + i.n, 0);
+  const mb = (b) => (b / 1048576).toFixed(1) + ' МБ';
+
+  return `<div class="al-block" data-stagger>
+    <h4>Хранилище · ${mb(st.dbBytes)}</h4>
+    <div class="al-note" style="margin-bottom:10px">
+      ${junk ? `Можно освободить: ${fmt(junk)} строк служебных данных.`
+             : 'Мусора не найдено — база чистая.'}
+      Архивы пользователей не затрагиваются.
+    </div>
+    ${(st.items || []).map((i) => `
+      <button class="al-sweep ${i.n ? '' : 'off'}" data-sweepkey="${esc(i.key)}"
+        data-on="${i.n ? '1' : '0'}" ${i.n ? '' : 'disabled'}>
+        <span class="bx">${i.n ? '✓' : ''}</span>
+        <span class="lb">${esc(i.label)}</span>
+        <span class="nb">${fmt(i.n)}</span>
+      </button>`).join('')}
+    ${junk ? `<button class="al-act danger" data-sweep style="margin-top:10px">
+      Очистить выбранное</button>` : ''}
+
+    ${(st.log || []).length ? `<h4 style="margin-top:18px">Журнал действий</h4>
+      ${st.log.slice(0, 8).map((l) => `<div class="al-user" style="padding:7px 0">
+        <span class="al-user-main">
+          <span class="al-user-name" style="font-size:12.5px">${esc(l.action)}${l.target ? ' → ' + esc(l.target) : ''}</span>
+          <span class="al-user-sub">${esc(l.details || '')}</span>
+        </span>
+        <span class="al-user-side"><span class="lbl">${new Date(l.at).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</span></span>
+      </div>`).join('')}` : ''}
+  </div>`;
 }
 
 /* ── Админка (только для владельца) ── */
@@ -872,7 +1015,8 @@ function Admin() {
     const src = authUrl('/api/avatar', { peer: p.id });
     const online = p.lastActive && (Date.now() - new Date(p.lastActive)) < 7 * 864e5;
     const name = p.name || (p.username ? '@' + p.username : 'ID ' + p.id);
-    return `<div class="al-user">
+    const open = S.adminOpen === p.id;
+    return `<div class="al-user" data-adminopen="${esc(p.id)}" style="cursor:pointer">
       <span class="al-ava" style="background:${tintFor(p.id)}">
         <img src="${src}" alt="" loading="lazy" onerror="this.remove()">${letter}</span>
       <span class="al-user-main">
@@ -888,7 +1032,17 @@ function Admin() {
           <span class="al-dot" style="background:${online ? GR : '#C9C6D8'}"></span>${online ? 'активен' : 'тихо'}
         </span>
       </span>
-    </div>`;
+    </div>
+    ${open ? `<div class="al-acts">
+      <div class="al-note" style="margin:0 0 8px">
+        ID ${esc(p.id)} · ${fmt(p.messages)} сообщений в архиве.
+        Бот сообщит человеку об очистке. Действие попадёт в журнал.
+      </div>
+      <button class="al-act" data-adminerase="${esc(p.id)}" data-amode="archive">
+        Очистить архив</button>
+      <button class="al-act danger" data-adminerase="${esc(p.id)}" data-amode="full">
+        Удалить пользователя целиком</button>
+    </div>` : ''}`;
   };
 
   const list = a.list || [];
@@ -963,6 +1117,8 @@ function Admin() {
         </span>
       </div>`).join('')}
     </div>
+
+    ${storageBlock()}
 
     ${m.quarantined ? `<div class="al-block" style="border:1px solid rgba(251,146,60,.35)" data-stagger>
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
@@ -1254,7 +1410,7 @@ function render() {
 
 /* ── события ── */
 document.addEventListener('click', (e) => {
-  const el = e.target.closest('[data-tab],[data-open],[data-ctab],[data-reload],[data-addbot],[data-export],[data-toggle],[data-clear-search],[data-erase],[data-tglink],[data-pin],[data-clear-msgsearch],[data-mode]');
+  const el = e.target.closest('[data-tab],[data-open],[data-ctab],[data-reload],[data-addbot],[data-export],[data-toggle],[data-clear-search],[data-erase],[data-tglink],[data-pin],[data-clear-msgsearch],[data-mode],[data-erasechat],[data-adminerase],[data-sweep],[data-adminopen],[data-sweepkey]');
   if (!el) return;
   if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
 
@@ -1269,6 +1425,25 @@ document.addEventListener('click', (e) => {
     return;
   }
   if (el.dataset.erase !== undefined) { eraseAll(); return; }
+  if (el.dataset.erasechat) {
+    eraseChat(el.dataset.erasechat, S.chat?.title || 'чат', el.dataset.unlink === '1');
+    return;
+  }
+  if (el.dataset.adminerase) { adminErase(el.dataset.adminerase, el.dataset.amode); return; }
+  if (el.dataset.sweep !== undefined) { runSweep(); return; }
+  if (el.dataset.sweepkey) {
+    // Галочка живёт в разметке, а не в состоянии: перерисовка всего блока
+    // ради одного щелчка сбрасывала бы остальные отметки.
+    el.dataset.on = el.dataset.on === '1' ? '0' : '1';
+    el.querySelector('.bx').textContent = el.dataset.on === '1' ? '✓' : '';
+    el.classList.toggle('off', el.dataset.on !== '1');
+    return;
+  }
+  if (el.dataset.adminopen) {
+    S.adminOpen = S.adminOpen === el.dataset.adminopen ? null : el.dataset.adminopen;
+    render();
+    return;
+  }
   if (el.dataset.pin) { togglePin(Number(el.dataset.pin)); return; }
   if (el.dataset.clearMsgsearch !== undefined) { S.msgSearch = ''; loadMessages(); return; }
   if (el.dataset.export) { downloadChat(el.dataset.export); return; }

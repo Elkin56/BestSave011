@@ -211,6 +211,22 @@ const MOCK = {
       generatedAt:new Date().toISOString(),
     };
 
+    if (route === 'storage') return {
+      dbBytes: 198 * 1024 * 1024,
+      items: [
+        { key:'orphanChats',    label:'Чаты без владельцев', n:14 },
+        { key:'orphanMessages', label:'Сообщения удалённых пользователей', n:2310 },
+        { key:'staleNotices',   label:'Недоставленные уведомления старше 30 дней', n:63 },
+        { key:'deadConnections',label:'Отключённые бизнес-подключения', n:0 },
+      ],
+      log: [
+        { admin:'901', action:'erase:archive', target:'903', details:'сообщений: 889',
+          at:'2026-08-01T10:12:00Z' },
+        { admin:'901', action:'sweep', target:null,
+          details:'orphanChats:3, staleNotices:41', at:'2026-07-30T08:00:00Z' },
+      ],
+    };
+
     throw new Error('в превью нет данных для ' + route);
   },
 
@@ -221,7 +237,14 @@ const MOCK = {
       return { ...body, pending: PREVIEW_MODE === 'instant' ? 0 : 4 };
     }
     if (path.includes('pin')) return { pinned: body.pinned !== false };
-    if (path.includes('erase')) return { ok:true, messages:1469, chats:7, connections:1 };
+    if (path.includes('admin-erase')) return { ok:true, mode:body.mode, messages:889 };
+    if (path.includes('storage')) return { ok:true, total:2387, dbBytes:181*1024*1024,
+      done:[{ key:'orphanChats', label:'Чаты без владельцев', deleted:14 }] };
+    if (path.includes('erase')) {
+      return body.chatId
+        ? { ok:true, scope:'chat', messages:36, unlinked:body.unlink === true }
+        : { ok:true, scope:'account', messages:1469, chats:7, connections:1 };
+    }
     return { ok:true };
   },
 

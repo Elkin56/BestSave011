@@ -435,6 +435,26 @@
   .admin-light .chart-sum{color:var(--al-ink-2)}
   .admin-light .xlab span{color:var(--al-ink-2)}
   .admin-light .sec{color:var(--al-ink-2)}
+
+  /* Действия владельца над пользователем и уборка хранилища */
+  .al-acts{padding:2px 0 12px;display:flex;flex-direction:column;gap:7px}
+  .al-act{width:100%;padding:10px 14px;border-radius:11px;font-size:13px;font-weight:800;
+    font-family:'Manrope',sans-serif;cursor:pointer;text-align:left;
+    background:#F1EFFA;color:#4B4470;border:1px solid #DDD8F0}
+  .al-act:hover{background:#E7E3F7}
+  .al-act.danger{background:#FEF2F2;color:#B91C1C;border-color:#FCA5A5}
+  .al-act.danger:hover{background:#FEE2E2}
+  .al-sweep{width:100%;display:flex;align-items:center;gap:10px;padding:9px 12px;
+    margin-bottom:6px;border-radius:11px;cursor:pointer;font-family:'Manrope',sans-serif;
+    background:#F7F5FD;border:1px solid #E4DFF3;text-align:left}
+  .al-sweep .bx{width:19px;height:19px;flex-shrink:0;border-radius:6px;
+    background:#7C6CF0;color:#fff;font-size:12px;font-weight:900;
+    display:flex;align-items:center;justify-content:center}
+  .al-sweep .lb{flex:1;font-size:12.5px;font-weight:700;color:#4B4470;min-width:0}
+  .al-sweep .nb{font-size:12.5px;font-weight:900;color:#7C6CF0;font-variant-numeric:tabular-nums}
+  .al-sweep.off{opacity:.5}
+  .al-sweep.off .bx{background:#D6D1E8}
+  .al-sweep[disabled]{cursor:default}
 </style>
 </head>
 <body>
